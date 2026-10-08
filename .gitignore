@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+/backups/
+/data/
+/secrets/
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.zip
+*.tgz
+*.tar.gz
+node_modules/
+.DS_Store
