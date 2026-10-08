@@ -2,47 +2,52 @@
 
 ## Running baseline
 
-- Host: MulattoTechBox, Windows 11, Docker Desktop
-- Deployment path: `C:\Tools\Dev\BabyTracker`
+- Host: MulattoTechBox (Windows 11 / Docker Desktop)
+- Local source path: `C:\Tools\Dev\BabyTracker`
 - Repository: `MulattoTech/BabyTracker` (private)
-- Docker Compose service: `babytracker-sprout`
-- Upstream image: `sprouttrack/sprout-track:1.6.7`
-- Retrieved image digest: `sha256:445b7dfd6cc8976e9e0ec313457c11b8336befea5a2fab69fd573ff55ac77a64`
-- Host listener: `127.0.0.1:3123` (loopback only; not accessible directly from LAN)
-- Local endpoint: http://localhost:3123
-- Remote-access design: tailnet-private HTTPS using Tailscale Serve at https://mulattotechbox.tail8e12aa.ts.net
-- Tailscale status as of initial test: **requires one-time tailnet owner approval**, no Serve config yet
-- **No public ingress** or Tailscale Funnel enabled
-- Reboot policy: Docker service `restart: unless-stopped`; Docker Desktop itself must be running
+- Docker service: `babytracker-sprout`
+- Image: `sprouttrack/sprout-track:1.6.7`
+- Initial image digest: `sha256:445b7dfd6cc8976e9e0ec313457c11b8336befea5a2fab69fd573ff55ac77a64`
+- Host listener: `127.0.0.1:3123` only
+- Tailnet-private HTTPS: https://mulattotechbox.tail8e12aa.ts.net
+- Tailscale Serve: ENABLED (not Funnel); HTTPS test returned 200
+- Application environment: `COOKIE_SECURE=true`, configured in ignored local `.env`
+- Reboot policy: Docker `restart: unless-stopped`; Docker Desktop itself must start to run containers
 
-## Verified results
+## Tests completed
 
-- Compose file validation: PASS
-- Docker container healthcheck: HEALTHY
-- Local HTTP request: 200
-- 3 persistent volumes: `babytracker-sprout-db`, `babytracker-sprout-env`, `babytracker-sprout-files`
-- Snapshot archive created under ignored local `backups/` path
-- Snapshot tar contents verified: two SQLite DBs, `env/.env`, file volume
-- Restore rehearsal used three **temporary** isolated volumes; both SQLite `PRAGMA integrity_check` returned `ok`
-- Required encryption and JWT configuration keys present in snapshot
-- PowerShell scripts parsed without syntax errors
-- GitHub CLI release watcher created issues for Sprout Track 1.6.7 and Baby Buddy v2.11.0
-- Windows Task Scheduler: `BabyTracker - Upstream Release Watch` registered for Mondays 9:00 AM; only when logged in; issue creation only; never changes production
+- [x] Compose YAML resolved and validated
+- [x] Docker healthcheck = healthy
+- [x] HTTPS response = 200 (valid private Tailscale Serve route)
+- [x] Three persistent volumes: database, encrypted-file/env secrets, attachments
+- [x] Offline tar backup of all three volumes
+- [x] Tar manifest inspected (2 SQLite DBs, `env/.env`, files)
+- [x] Restore into three disposable volumes
+- [x] SQLite `PRAGMA integrity_check` = ok on main and log DBs
+- [x] Backup contains encryption/JWT configuration keys
+- [x] Temporary restore volumes cleaned up
+- [x] PowerShell script syntax validated
+- [x] Local upstream watcher created review issues for current releases
+- [x] Windows Task Scheduler release-watch task created and executed, exit code 0
+- [x] Deduplication demonstrated: second watch created no duplicate issues
 
-## Not yet completed
+## Pending household setup / roadmap
 
-- First-run family/baby/caretaker wizard and default PIN/admin password change (user login required)
-- Tailscale Serve authorization for private HTTPS / PWA
-- Phone and iPad browser/PWA smoke test
-- Combined Baby Buddy-specific features, PDF ingestion, sleep predictions (future work)
+- [ ] Complete first-run family, baby, caregiver setup and replace stock PIN/admin password
+- [ ] Confirm mobile phone and iPad access with user's Tailscale-authenticated devices; install PWA
+- [ ] Build Baby Buddy-only missing features and adapters
+- [ ] Implement filled/scanned/handwritten PDF import and review
+- [ ] Implement independent adaptive nap/bedtime prediction
 
-## GitHub Actions
+## Upstream update policy
 
-Initial hosted runner **did not start**. GitHub's check annotation cites account billing/payment/spending limit. See issue #32. Local validation succeeded; scheduled local upstream watcher is the temporary fallback. The repository includes an Actions release-watch workflow for when billing is resolved.
+Production updates are manual and backup-first. Weekly Monday 9 AM watcher opens GitHub review issues but never changes running images, records, or migrations.
 
-## Safety boundaries
+GitHub Actions runner provisioning is blocked by the account's billing/payment/spending-limit warning. See issue #32. Local validation and scheduled upstream watching are operational.
 
-- Do not delete production volumes or run `docker compose down -v`.
-- Keep `.env`, volume backups, and raw infant care records out of GitHub.
-- Never expose upstream default admin/PIN credentials to public network.
-- Update only after a verified backup and isolated compatibility qualification.
+## Safety
+
+- No public port forwarding, no Tailscale Funnel.
+- No secrets, uploaded PDFs, or backup archives committed to GitHub.
+- Do not run `docker compose down -v` or delete the production volumes.
+- Onboarding passwords/PINs must be changed before real family data is entered.
