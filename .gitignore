@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 /backups/
+/.local/
 /data/
 /secrets/
 *.db

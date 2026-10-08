@@ -74,4 +74,15 @@ docker compose down # does NOT delete persistent data volumes
 - [Sprout Track](https://github.com/Oak-and-Sprout/sprout-track)
 - [Baby Buddy](https://github.com/babybuddy/babybuddy)
 
-Origin: earlier [M-TechLabs planning branch](https://github.com/MulattoTech/M-TechLabs/pull/66), [master issue](https://github.com/MulattoTech/M-TechLabs/issues/65).
+Current [BabyTracker master issue #21](https://github.com/MulattoTech/BabyTracker/issues/21), [Phase 0 setup issue #30](https://github.com/MulattoTech/BabyTracker/issues/30), and the earlier [M-TechLabs planning PR](https://github.com/MulattoTech/M-TechLabs/pull/66).
+
+
+## Verified deployment and release monitoring
+
+See [deployment status](docs/DEPLOYMENT_STATUS.md) for what has actually passed and what still needs user setup.
+
+The PC runs a weekly low-privilege Windows task, **BabyTracker - Upstream Release Watch**, Mondays at 9:00 AM (when signed in). It creates GitHub review issues for new Sprout Track and Baby Buddy releases but does **not** upgrade production. Manual check: `powershell -NoProfile -File .\scripts\check-upstreams.ps1`.
+
+GitHub Actions release review is also configured but hosted jobs are currently blocked by [an account billing restriction](https://github.com/MulattoTech/BabyTracker/issues/32).
+
+After running `scripts/backup.ps1`, verify a restore using `scripts/test-restore.ps1`; it uses disposable volumes and never mutates the production database.

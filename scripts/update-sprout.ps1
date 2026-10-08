@@ -20,7 +20,7 @@ try {
     if ($old -match '(?m)^SPROUT_IMAGE=') {
         $new = [regex]::Replace($old, '(?m)^SPROUT_IMAGE=.*$', $replace)
     } else { $new = "$replace`r`n$old" }
-    Set-Content -Path $envPath -Value $new -Encoding UTF8
+    [System.IO.File]::WriteAllText($envPath, $new, (New-Object System.Text.UTF8Encoding($false)))
     & docker compose pull sprout
     if ($LASTEXITCODE -ne 0) { throw 'Image pull failed' }
     & docker compose up -d --wait

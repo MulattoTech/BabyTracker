@@ -1,0 +1,45 @@
+name: Review upstream releases
+on:
+  schedule:
+    - cron: '17 14 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+jobs:
+  check-releases:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Detect new upstream release tags (no automatic upgrades)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEST_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for upstream in Oak-and-Sprout/sprout-track babybuddy/babybuddy; do
+            tag="$(gh api "repos/$upstream/releases/latest" --jq '.tag_name' 2>/dev/null || true)"
+            if [[ -z "$tag" || "$tag" == "null" ]]; then
+              echo "::warning::No latest release available for $upstream"
+              continue
+            fi
+            title="[Upstream] $upstream $tag review"
+            if gh issue list -R "$DEST_REPO" --state all --limit 500 --json title --jq '.[].title' | grep -Fxq "$title"; then
+              echo "Already recorded: $title"
+              continue
+            fi
+            {
+              echo "Review upstream release: https://github.com/$upstream/releases/tag/$tag"
+              echo
+              echo 'Checklist:'
+              echo '- [ ] Review changelog, security fixes, dependencies, license and migrations'
+              echo '- [ ] Compare against BabyTracker parity/adapter contracts'
+              echo '- [ ] Take a verified three-volume backup of the production stack'
+              echo '- [ ] Qualify update in an isolated test instance, including restore'
+              echo '- [ ] Smoke-test phone/iPad and data entry/export'
+              echo '- [ ] Promote to pinned production image only after tests pass'
+              echo
+              echo 'Do not auto-merge or blindly replace an image that may migrate family records.'
+            } > /tmp/babytracker-upstream-review.md
+            gh issue create -R "$DEST_REPO" --title "$title" --body-file /tmp/babytracker-upstream-review.md
+          done
