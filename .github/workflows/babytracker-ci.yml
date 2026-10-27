@@ -15,7 +15,9 @@ concurrency:
 
 jobs:
   reviewed-ocr:
-    runs-on: ubuntu-latest
+    # Match the tested native/browser toolchain; ubuntu-latest can advance to an
+    # OS release that the pinned Playwright browser does not support yet.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       NEXT_TELEMETRY_DISABLED: '1'
