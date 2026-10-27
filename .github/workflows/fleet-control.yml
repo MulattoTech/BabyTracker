@@ -1,0 +1,24 @@
+name: BabyTracker Fleet Control
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: babytracker-fleet-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+jobs:
+  isolated-controls:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify isolation, controls and recovery
+        run: node --test tools/fleet-control/test/*.test.js
+      - name: Check dashboard JavaScript
+        run: node --check tools/fleet-control/public/app.js
