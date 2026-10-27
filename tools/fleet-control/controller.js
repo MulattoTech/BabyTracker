@@ -284,18 +284,30 @@ class FleetController {
       }
     });
   }
-  async reconcileAgentSpawn() {
+  async reconcileAgentSpawn({ confirmNoSession = false } = {}) {
     return this.serial(async () => {
       const pending = this.state.provisioning;
       if (!pending || !['pending', 'uncertain'].includes(pending.status)) throw Error('No uncertain spawn to reconcile');
-      const sessions = await this.sessions(), previousIds = new Set(pending.previousIds || []);
-      const found = sessions.filter(s => !previousIds.has(s.id) && active(s) && s.projectId === PROJECT &&
-        s.harness === pending.selection?.harness && s.kind === pending.selection?.kind &&
-        s.displayName === pending.selection?.name);
-      if (found.length !== 1) throw Error('Exactly one new project-owned session could not be verified. No retry performed.');
-      pending.status = 'verified'; pending.id = found[0].id; delete pending.previousIds; delete pending.reason;
-      pending.at = new Date(this.now()).toISOString(); this.save(); this.audit('agent_spawn_reconciled', { id: found[0].id });
-      return { ok: true, sessionId: found[0].id, note: 'Verified an existing BabyTracker agent without creating a duplicate.' };
+      const originalIds = new Set(pending.previousIds || []);
+      const findNew = sessions => sessions.filter(s => !originalIds.has(s.id) && s.projectId === PROJECT);
+      const first = findNew(await this.sessions());
+      if (first.length === 1 && active(first[0]) && first[0].harness === pending.selection?.harness &&
+          first[0].kind === pending.selection?.kind && first[0].displayName === pending.selection?.name) {
+        pending.status = 'verified'; pending.id = first[0].id; delete pending.previousIds; delete pending.reason;
+        pending.at = new Date(this.now()).toISOString(); this.save(); this.audit('agent_spawn_reconciled', { id: first[0].id });
+        return { ok: true, sessionId: first[0].id, note: 'Verified an existing BabyTracker agent without creating a duplicate.' };
+      }
+      if (first.length || !confirmNoSession) throw Error('A new project session was not verified; no retry performed. Inspect AO and use explicit no-session reconciliation if native spawn failed.');
+      const ageMs = this.now() - Date.parse(pending.at);
+      if (!Number.isFinite(ageMs) || ageMs < 30000) throw Error('Wait at least 30 seconds before reconciling a rejected native spawn');
+      await new Promise(resolve => setTimeout(resolve, 400));
+      const second = findNew(await this.sessions());
+      if (second.length) throw Error('New BabyTracker session appeared during reconciliation. Inspect its ownership before retrying.');
+      pending.status = 'rejected'; pending.rejectedAt = new Date(this.now()).toISOString();
+      pending.reason = 'Explicit failed native spawn; two AO reads confirmed no new BabyTracker session';
+      delete pending.previousIds; this.save();
+      this.audit('agent_spawn_no_session_confirmed', { name: pending.selection?.name, harness: pending.selection?.harness });
+      return { ok: true, note: 'No BabyTracker agent was created. The previous rejected spawn is recorded and cleared; you may now retry with a supported provider mode.' };
     });
   }
   async assign(taskId, agentId) {
