@@ -22,10 +22,13 @@ function render(s) {
   $('mode').textContent = s.mode.toUpperCase(); $('sync').textContent = 'Observed ' + new Date(s.observedAt).toLocaleTimeString();
   $('total').textContent = s.runtime.online ? s.summary.total : '—'; $('working').textContent = s.runtime.online ? s.summary.working : '—'; $('available').textContent = s.runtime.online ? s.summary.available : '—';
   $('quota').textContent = s.quota.fresh ? s.quota.remainingPercent + '%' : '—'; $('quotaNote').textContent = s.quota.fresh ? 'Shared account · current sample' : s.quota.reason;
-  $('notice').textContent = !s.runtime.online ? s.runtime.reason + '. No live activity is being claimed.' : s.emergency ? 'Emergency stop: ' + s.emergency.phase + '. Remaining sessions: ' + (s.emergency.remaining ?? 'unverified') : s.dispatchBlocker || 'Bounded dispatch is enabled. The queue and run budget govern new assignments.';
-  $('notice').classList.toggle('warning', !s.runtime.online || !!s.dispatchBlocker || !!s.emergency);
+  $('notice').textContent = !s.runtime.online ? s.runtime.reason + '. No live activity is being claimed.' : s.emergency ? 'Emergency stop: ' + s.emergency.phase + '. Remaining sessions: ' + (s.emergency.remaining ?? 'unverified') : (s.dispatchBlocker || s.codexDispatchBlocker) || 'Bounded dispatch is enabled. The queue and run budget govern new assignments.';
+  $('notice').classList.toggle('warning', !s.runtime.online || !!s.dispatchBlocker || !!s.codexDispatchBlocker || !!s.emergency);
   $('resources').textContent = 'Free RAM: ' + s.resources.freeMemoryGiB.toFixed(1) + ' / ' + s.resources.totalMemoryGiB.toFixed(1) + ' GiB · CPU: ' + (s.resources.cpuPercent === null ? 'unavailable' : s.resources.cpuPercent + '%') + ' · Disk I/O: unavailable · Run dispatches: ' + (s.run?.dispatches ?? 0) + ' / ' + s.limits.maxDispatches;
   $('turbo').textContent = s.run?.turbo ? 'Disable Turbo' : 'Enable Turbo';
+  $('reconcileAgent').hidden = !['pending', 'uncertain'].includes(s.provisioning?.status);
+  const agy = s.agyUsage || {};
+  $('agyInfo').textContent = agy.fresh && agy.remainingPercent !== null ? 'Google AGY remaining: ' + agy.remainingPercent + '% (observed, not automatically polled; no verified auto cutoff)' : 'Google AGY quota unknown/stale. AGY may be dispatched manually only with a separate confirmation; no automatic percentage cutoff.';
   $('rows').innerHTML = s.sessions.length ? s.sessions.map(a => '<tr><td><strong>' + esc(a.name) + '</strong><div class="subtext">' + esc(a.id) + '</div></td><td>' + esc(a.model) + '<div class="subtext">' + esc(a.harness) + (a.effort ? ' · ' + esc(a.effort) : '') + '</div></td><td><span class="state-chip ' + (a.busy ? 'active' : a.label === 'Blocked' ? 'blocked' : '') + '">' + esc(a.label) + '</span></td><td>' + (a.issue ? '<a href="https://github.com/MulattoTech/BabyTracker/issues/' + Number(a.issue) + '">Issue #' + Number(a.issue) + '</a>' : 'No reserved task') + '<div class="subtext">' + a.prs.map(p => 'PR #' + Number(p.number) + ' · ' + esc(p.ci || p.state || 'unknown')).join(', ') + '</div></td><td>' + (a.unresolvedDelivery ? 'Manual reconciliation needed' : a.cooldownSeconds ? a.cooldownSeconds + 's cooldown' : 'No reliable ETA') + '</td><td><div class="row-actions"><button class="small-action" data-session="' + esc(a.id) + '" data-op="nudge">Nudge</button><button class="small-action accent" data-session="' + esc(a.id) + '" data-op="find-work">Find Work</button><button class="small-action" data-session="' + esc(a.id) + '" data-op="plan">Model plan</button></div></td></tr>').join('') : '<tr><td colspan="6" class="empty">' + (s.runtime.online ? 'No BabyTracker sessions are registered. MJobs agents are excluded. Click Start Fleet to provision one verified BabyTracker Codex orchestrator. No worker is created merely by opening this dashboard.' : 'Orchestrator runtime is unavailable. The local controller and saved task queue remain accessible.') + '</td></tr>';
   $('tasks').innerHTML = s.tasks.length ? s.tasks.map(t => '<div class="task-item"><div><strong>' + esc(t.priority) + ' · ' + esc(t.title) + '</strong><p><a href="https://github.com/MulattoTech/BabyTracker/issues/' + Number(t.issue) + '">Requirement #' + Number(t.issue) + '</a> · ' + esc(t.status) + ' · Acceptance: ' + esc(t.acceptance) + '</p><p>' + esc(t.files.join(', ')) + '</p></div>' + (['proposed', 'queued'].includes(t.status) ? '<div><select aria-label="Assign worker" data-task="' + esc(t.id) + '"><option value="">Choose available worker</option>' + s.sessions.filter(a => a.idle).map(a => '<option value="' + esc(a.id) + '"' + (a.id === t.agentId ? ' selected' : '') + '>' + esc(a.name) + '</option>').join('') + '</select></div>' : '') + '</div>').join('') : '<div class="empty">No assigned tasks. Add a real GitHub issue with a bounded scope to propose the next useful change.</div>';
   if (!limitsLoaded) { for (const [key, value] of Object.entries(s.limits)) $('limitsForm').elements[key].value = value; limitsLoaded = true; }
@@ -48,7 +51,12 @@ $('taskForm').addEventListener('submit', async event => { event.preventDefault()
 $('tasks').addEventListener('change', event => { const select = event.target.closest('select[data-task]'); if (select?.value) action('assign', { taskId: select.dataset.task, agentId: select.value }).catch(() => {}); });
 $('rows').addEventListener('click', async event => {
   const button = event.target.closest('button[data-session]'); if (!button) return;
-  if (button.dataset.op !== 'plan') return action(button.dataset.op, { id: button.dataset.session }).catch(() => {});
+  if (button.dataset.op !== 'plan') {
+    const found = snapshot?.sessions.find(s => s.id === button.dataset.session);
+    const agy = found?.harness === 'agy';
+    if (agy && !confirm('AGY has no verified automatic percentage quota cutoff. Send exactly one bounded manual instruction? This may use your Google AI allowance.')) return;
+    return action(button.dataset.op, { id: button.dataset.session, acknowledgeUnknownAgyQuota: agy }).catch(() => {});
+  }
   try {
     providers = (await get('/api/providers')).providers.filter(p => p.available && p.models.length);
     if (!providers.length) return toast('No provider model catalog has been verified for this installation yet.', true);
@@ -59,4 +67,48 @@ function updateModels() { const provider = providers.find(p => p.id === $('planP
 function updateEfforts() { const model = providers.find(p => p.id === $('planProvider').value)?.models.find(m => m.id === $('planModel').value); $('planEffort').innerHTML = (model?.efforts || []).map(e => '<option>' + esc(e) + '</option>').join(''); }
 $('planProvider').addEventListener('change', updateModels); $('planModel').addEventListener('change', updateEfforts);
 $('savePlan').addEventListener('click', async () => { try { await action('model-plan', { id: $('planAgent').value, plan: { harness: $('planProvider').value, model: $('planModel').value, effort: $('planEffort').value, mode: 'tui' } }); $('planDialog').close(); } catch {} });
+async function loadAgentProviders() {
+  const catalog = await get('/api/providers');
+  providers = (catalog.providers || []).filter(p => p.available && p.models?.length && ['codex', 'agy'].includes(p.id));
+  if (!providers.length) throw Error('No locally verified Codex or AGY models are currently available');
+}
+function fillAgentModels() {
+  const p = providers.find(x => x.id === $('newAgentProvider').value);
+  $('newAgentModel').innerHTML = (p?.models || []).map(m => '<option value="' + esc(m.id) + '">' + esc(m.name) + '</option>').join('');
+  fillAgentEfforts();
+  const agy = p?.id === 'agy';
+  $('agentProviderWarning').textContent = agy
+    ? 'AGY / Google Gemini: independent quota; no verified automatic percentage cutoff. Explicit creation and manual turns only. Google AI credit overages should be disabled in your AGY account.'
+    : 'Codex: creation and dispatch require fresh shared-account usage, respecting your remaining quota threshold.';
+}
+function fillAgentEfforts() {
+  const m = providers.find(p => p.id === $('newAgentProvider').value)?.models.find(m => m.id === $('newAgentModel').value);
+  $('newAgentEffort').innerHTML = (m?.efforts || []).map(e => '<option value="' + esc(e) + '">' + esc(e) + '</option>').join('');
+  if (m?.defaultEffort) $('newAgentEffort').value = m.defaultEffort;
+}
+$('addAgent').addEventListener('click', async () => {
+  try {
+    await loadAgentProviders();
+    $('newAgentProvider').innerHTML = providers.map(p => '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>').join('');
+    $('newAgentName').value = 'BabyTracker Worker ' + (snapshot?.summary.total + 1 || 1);
+    fillAgentModels();
+    $('addAgentDialog').showModal();
+  } catch (e) { toast(e.message, true); }
+});
+$('newAgentProvider').addEventListener('change', fillAgentModels);
+$('newAgentModel').addEventListener('change', fillAgentEfforts);
+$('createAgent').addEventListener('click', async () => {
+  const agent = { name: $('newAgentName').value.trim(), kind: $('newAgentKind').value,
+    harness: $('newAgentProvider').value, model: $('newAgentModel').value,
+    effort: $('newAgentEffort').value, acknowledgeUnknownAgyQuota: false };
+  if (agent.name.length < 3 || agent.name.length > 80) return toast('Choose a descriptive agent name (3-80 characters).', true);
+  if (agent.harness === 'agy') {
+    if (!confirm('Create one AGY agent with the selected Google Gemini model? This may use your Google AI allowance. Native quota reporting is currently unverified, and automatic AGY dispatch is disabled.')) return;
+    agent.acknowledgeUnknownAgyQuota = true;
+  } else if (!confirm('Create one Codex agent? This may consume shared Codex allowance, guarded by the configured usage threshold.')) return;
+  $('createAgent').disabled = true;
+  try { await action('add-agent', { agent }); $('addAgentDialog').close(); }
+  catch {} finally { $('createAgent').disabled = false; }
+});
+$('reconcileAgent').addEventListener('click', () => action('reconcile-agent').catch(() => {}));
 refresh(); setInterval(refresh, 8000);

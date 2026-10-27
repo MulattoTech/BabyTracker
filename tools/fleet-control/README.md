@@ -9,11 +9,13 @@ It **does not load MJobs runtime state or install its machine-wide kill scripts*
 
 - Responsive local dashboard at `http://127.0.0.1:4319`.
 - Actual BabyTracker session reads from the existing Orchestrator daemon.
+- An **All Projects** overview at `/projects`, listing live AO projects with session counts and links to existing scoped controllers. This is a shared landing page, not a cross-project write proxy.
+- Explicit project-scoped **Add Agent** for one verified Codex or AGY (Google Gemini) session using the actual AO CLI, with live model/reasoning selection, durable uncertain-delivery reconciliation, no automatic initial task, separate maximum agent count, and no duplicate orchestrator.
 - Explicit Start, Pause, Graceful Stop, Emergency Stop, controller Restart,
   Nudge, Find Work, one-pass All Hands and bounded Turbo.
 - Durable task proposals, exclusive file assignments, dependencies and model
   plans. A model plan is **staged**, not a running model change.
-- Separate per-run concurrency, dispatch count, elapsed-time, free-memory and
+- Separate per-run concurrency, dispatch count, elapsed-time, maximum registered agents, free-memory and
   remaining-account-quota limits. Unknown/stale quota blocks new dispatch.
 - A durable dispatch reservation precedes each send. Uncertain delivery is
   preserved across cooldown expiry and restarts and is not automatically retried.
@@ -35,9 +37,8 @@ the correct checkout. No model inference is used for dashboard reads.
 
 ## Explicitly incomplete
 
-Dynamic worker provisioning beyond a single Start-triggered Codex orchestrator,
-worker-model replacement, general live project-binding discovery,
-Gemini quota verification, per-turn token/duration analytics, disk I/O, acceptance
+Automatic multi-agent scaling, model replacement for running agents, and generic project onboarding beyond the registered read-only overview,
+verified automatic AGY quota enforcement, per-turn token/duration analytics, disk I/O, acceptance
 evidence ingestion, automated GitHub task discovery and full Mission Control proxy
 integration are not implemented in this slice. The UI marks unsupported metrics
 unavailable and acceptance unassessed. No criterion becomes PASS from issue
@@ -120,8 +121,14 @@ not assign a task; select an available agent's Find Work or explicitly assign
 one of the real queued issues to initiate a bounded turn. Starting Codex may
 consume provider allowance, so Start requires explicit confirmation.
 
+You can also use **Add Agent** while paused or running to create more BabyTracker workers. Codex models come from MJobs' verified read-only local provider catalog (port 8787); AGY model IDs are discovered from its installed local CLI and restricted to Google's Gemini models. Both require a fresh native AO project/repo/path and provider authorization check before spawning. Only an explicit click can create a session; no prompt is sent automatically. An uncertain native spawn blocks repeat creation until the Reconcile button verifies the exact session.
+
+AGY's Google allowance is distinct from Codex's shared percentage. The native AGY usage feed may be missing or stale; the controller never invents percentages or advertises a verified AGY auto-stop. AGY creation requires a warning confirmation. AGY Find Work/Nudge require separate explicit confirmation for each manual turn; AGY is excluded from Turbo, All Hands and automatic queued dispatch. If fresh AGY quota is observed at/below the configured cutoff, new AGY actions are blocked. Configure Google's **AI Credit Overages = Never** if you want to prevent paid overages; the software cannot inspect this account setting. Standalone Gemini CLI is not required or enabled.
+
+See [UNIFIED_FLEET_HUB.md](UNIFIED_FLEET_HUB.md) for shared portal scope and the next project-template migration steps.
+
 Then start a bounded run explicitly. Default limits are 2 concurrent turns,
-8 dispatches, 60 minutes, 20% minimum remaining allowance and 4 GiB free RAM.
+8 dispatches, 60 minutes, 20% minimum remaining Codex allowance, 4 GiB free RAM and 12 agents. Existing local accounts may have different user-set limits (including 7%); the persisted values always take precedence.
 They are configurable while paused. All Hands runs one bounded pass. Automatic
 Turbo sends only existing explicitly assigned queue tasks and pauses when none
 remain; it never generates filler tasks or unbounded status prompts.

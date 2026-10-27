@@ -7,6 +7,7 @@ const { DispatchLedger } = require('./vendor/mjobs/dispatch-ledger');
 const { instruction } = require('./vendor/mjobs/find-work');
 const { validateSelection } = require('./vendor/mjobs/provider-catalog');
 const { PROJECT, SOURCE_REPO, ISSUE_REPO } = require('./config');
+const { validateAgentInput } = require('./agent-provision');
 
 function writeJSON(file, value) {
   const temp = file + '.' + process.pid + '.tmp';
@@ -18,17 +19,18 @@ function idle(s) { return (s.activity?.state || s.activity) === 'idle' && !s.isT
 function busy(s) { return ['active', 'working'].includes(s.activity?.state || s.activity); }
 
 class FleetController {
-  constructor(config, { adapter, quota, providers = async () => ({ providers: [] }), now = Date.now, resources = () => ({ freeMemoryGiB: os.freemem() / 1073741824, totalMemoryGiB: os.totalmem() / 1073741824, cpuPercent: null, diskIO: null }) }) {
+  constructor(config, { adapter, quota, providers = async () => ({ providers: [] }), agyUsage = async () => ({ fresh: false, remainingPercent: null }), now = Date.now, resources = () => ({ freeMemoryGiB: os.freemem() / 1073741824, totalMemoryGiB: os.totalmem() / 1073741824, cpuPercent: null, diskIO: null }) }) {
     if (config.projectId !== PROJECT || config.sourceRepository !== SOURCE_REPO || config.issueRepository !== ISSUE_REPO) throw Error('BabyTracker project identity is fixed');
-    this.config = config; this.adapter = adapter; this.quotaReader = quota; this.providers = providers; this.now = now; this.resources = resources;
+    this.config = config; this.adapter = adapter; this.quotaReader = quota; this.providers = providers; this.agyReader = agyUsage; this.now = now; this.resources = resources;
     fs.mkdirSync(config.stateDir, { recursive: true, mode: 0o700 });
     this.file = path.join(config.stateDir, 'controller.json');
     this.auditFile = path.join(config.stateDir, 'audit.jsonl');
     this.ledger = new DispatchLedger({ root: config.stateDir, now });
     try { this.state = JSON.parse(fs.readFileSync(this.file, 'utf8')); }
     catch (e) { if (e.code !== 'ENOENT') throw Error('Controller state is unreadable; preserving it and refusing to start'); }
-    if (!this.state) this.state = { schema: 1, projectId: PROJECT, sourceRepository: SOURCE_REPO, issueRepository: ISSUE_REPO, mode: 'paused', generation: 0, tasks: [], plans: {}, run: null, limits: { concurrency: 2, maxDispatches: 8, maxMinutes: 60, minimumRemainingPercent: 20, minimumFreeMemoryGiB: 4 }, emergency: null };
+    if (!this.state) this.state = { schema: 1, projectId: PROJECT, sourceRepository: SOURCE_REPO, issueRepository: ISSUE_REPO, mode: 'paused', generation: 0, tasks: [], plans: {}, run: null, limits: { concurrency: 2, maxDispatches: 8, maxMinutes: 60, minimumRemainingPercent: 20, minimumFreeMemoryGiB: 4, maxAgents: 12 }, emergency: null };
     if (this.state.schema !== 1 || this.state.projectId !== PROJECT || this.state.sourceRepository !== SOURCE_REPO || this.state.issueRepository !== ISSUE_REPO || !Array.isArray(this.state.tasks)) throw Error('Controller state identity/schema mismatch');
+    if (this.state.limits.maxAgents === undefined) this.state.limits.maxAgents = 12;
     // A dashboard restart never resumes paid work, uncertain deliveries, or old automation.
     if (this.state.mode !== 'emergency') this.state.mode = 'paused';
     this.state.generation++; this.state.run = null;
@@ -44,19 +46,36 @@ class FleetController {
     return all.filter(s => s.projectId === PROJECT);
   }
   quota() { return this.quotaReader(); }
-  guard({ requireRunning = true, session = null } = {}) {
+  guard({ requireRunning = true, session = null, manualAgy = false } = {}) {
     if (this.state.mode === 'emergency') return 'BabyTracker emergency stop is latched';
+    if (this.state.mode === 'draining') return 'BabyTracker is draining';
     if (requireRunning && this.state.mode !== 'running') return 'Fleet is paused';
     if (!this.config.runtimeVerified) return 'BabyTracker Orchestrator project/repository binding is not yet verified';
-    if (session && session.harness !== 'codex') return 'Provider-specific budget telemetry has not been verified for this harness';
-    const q = this.quota();
-    if (!q.fresh || q.remainingPercent === null) return q.reason || 'Fresh Codex quota is required';
-    if (q.remainingPercent <= this.state.limits.minimumRemainingPercent) return 'Configured remaining-quota threshold reached';
     if (this.resources().freeMemoryGiB < this.state.limits.minimumFreeMemoryGiB) return 'Below configured free-memory threshold';
     const run = this.state.run;
     if (requireRunning && !run) return 'No bounded run is active';
     if (requireRunning && run && (run.dispatches >= this.state.limits.maxDispatches || this.now() >= run.deadline)) return 'Configured run budget is exhausted';
+    if (session?.harness === 'agy') {
+      if (!manualAgy) return 'AGY has no verified automatic quota cutoff; confirm one manual turn instead';
+      return null;
+    }
+    if (session && session.harness !== 'codex') return 'Unsupported provider';
+    if (session?.harness === 'codex') {
+      const q = this.quota();
+      if (!q.fresh || q.remainingPercent === null) return q.reason || 'Fresh Codex quota is required';
+      if (q.remainingPercent <= this.state.limits.minimumRemainingPercent) return 'Configured remaining Codex quota threshold reached';
+    }
     return null;
+  }
+  async verifyAgyQuota() {
+    let observation;
+    try { observation = await this.agyReader(); }
+    catch { observation = { fresh: false, remainingPercent: null, reason: 'AGY usage unavailable' }; }
+    if (observation?.fresh && Number.isFinite(observation.remainingPercent) &&
+        observation.remainingPercent <= this.state.limits.minimumRemainingPercent) {
+      throw Error('Observed remaining AGY quota is at or below the configured threshold');
+    }
+    return observation;
   }
   async snapshot() {
     let sessions = [], runtime = { online: true, reason: null };
@@ -77,7 +96,8 @@ class FleetController {
       else if (idle(s)) label = 'Available for Dispatch';
       return { id: s.id, projectId: PROJECT, name: s.displayName || s.id, kind: s.kind || 'worker', harness: s.harness || 'unknown', model: s.model || 'unknown', effort: s.effort || null, label, busy: busy(s), idle: idle(s), taskId: task?.id || null, issue: task?.issue || null, prs: (s.prs || []).map(p => ({ number: p.number, state: p.state, ci: p.ci, url: typeof p.url === 'string' && p.url.startsWith('https://github.com/' + SOURCE_REPO + '/') ? p.url : null })), cooldownSeconds: Math.ceil(cooldown / 1000), dispatchEta: cooldown > 0 ? new Date(now + cooldown).toISOString() : null, unresolvedDelivery: !!ambiguous, tokens: null, turnStatistics: null, lastActivity: s.activity?.timestamp || null };
     });
-    const result = { observedAt: new Date(now).toISOString(), projectId: PROJECT, sourceRepository: SOURCE_REPO, issueRepository: ISSUE_REPO, mode: this.state.mode, runtime, sessions: rows, tasks: this.state.tasks, plans: this.state.plans, limits: this.state.limits, run: this.state.run, quota: this.quota(), resources: this.resources(), dispatchBlocker: this.guard(), emergency: this.state.emergency, summary: { total: rows.length, working: rows.filter(x => x.busy).length, available: rows.filter(x => x.label === 'Available for Dispatch').length, blocked: rows.filter(x => x.label === 'Blocked').length }, acceptance: { status: 'NOT_ASSESSED', percent: null, note: 'Task completion is separate from requirement acceptance; no acceptance evidence has been imported.' }, capabilities: { scopedControl: true, persistentQueue: true, boundedDispatch: true, independentReviewGate: true, modelPlans: true, modelReplacement: false, firstCodexBootstrap: typeof this.adapter.provisionCodex === 'function', dynamicProvisioning: false, geminiBudget: false, diskIO: false, perAgentTokens: false } };
+    const agyUsage = await this.agyReader().catch(() => ({ fresh: false, remainingPercent: null, reason: 'AGY usage unavailable' }));
+    const result = { observedAt: new Date(now).toISOString(), agyUsage, provisioning: this.state.provisioning || null, projectId: PROJECT, sourceRepository: SOURCE_REPO, issueRepository: ISSUE_REPO, mode: this.state.mode, runtime, sessions: rows, tasks: this.state.tasks, plans: this.state.plans, limits: this.state.limits, run: this.state.run, quota: this.quota(), resources: this.resources(), dispatchBlocker: this.guard(), codexDispatchBlocker: this.guard({ session: { harness: 'codex' } }), emergency: this.state.emergency, summary: { total: rows.length, working: rows.filter(x => x.busy).length, available: rows.filter(x => x.label === 'Available for Dispatch').length, blocked: rows.filter(x => x.label === 'Blocked').length }, acceptance: { status: 'NOT_ASSESSED', percent: null, note: 'Task completion is separate from requirement acceptance; no acceptance evidence has been imported.' }, capabilities: { scopedControl: true, persistentQueue: true, boundedDispatch: true, independentReviewGate: true, modelPlans: true, modelReplacement: false, firstCodexBootstrap: typeof this.adapter.provisionCodex === 'function', explicitAgentProvisioning: typeof this.adapter.provisionSelection === 'function', dynamicProvisioning: true, automaticWorkerScaling: false, geminiBudget: false, diskIO: false, perAgentTokens: false } };
     this.lastSnapshot = result; return result;
   }
   async serial(fn) {
@@ -95,8 +115,13 @@ class FleetController {
       if (Object.values(this.ledger.entries).some(r => ['reserved', 'uncertain'].includes(r.status))) throw Error('Unresolved delivery requires manual reconciliation before startup');
       const generation = this.state.generation;
       let sessions = await this.sessions();
+      // AGY-only fleets are not blocked by a separate Codex quota window.
+      if (!sessions.some(s => active(s) && s.harness === 'agy')) {
+        const codexGate = this.guard({ requireRunning: false, session: { harness: 'codex' } });
+        if (codexGate) throw Error(codexGate);
+      }
       let createdSessionId = null;
-      if (!sessions.some(s => active(s) && s.harness === 'codex')) {
+      if (!sessions.some(active)) {
         if (['pending', 'uncertain'].includes(this.state.bootstrap?.status)) throw Error('An earlier Codex bootstrap has unverified delivery. Inspect AO sessions before retrying.');
         if (typeof this.adapter.provisionCodex !== 'function') throw Error('No verified BabyTracker Codex session exists; provisioning adapter is unavailable.');
         let provisioned;
@@ -191,7 +216,7 @@ class FleetController {
   }
   limits(input) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw Error('Limits object required');
-    const ranges = { concurrency: [1, 32], maxDispatches: [1, 1000], maxMinutes: [1, 720], minimumRemainingPercent: [1, 99], minimumFreeMemoryGiB: [1, 128] };
+    const ranges = { concurrency: [1, 32], maxDispatches: [1, 1000], maxMinutes: [1, 720], minimumRemainingPercent: [1, 99], minimumFreeMemoryGiB: [1, 128], maxAgents: [1, 64] };
     for (const [key, value] of Object.entries(input)) if (!ranges[key] || !Number.isInteger(value) || value < ranges[key][0] || value > ranges[key][1]) throw Error('Invalid limit: ' + key);
     if (this.state.mode === 'running') throw Error('Pause before changing a run budget');
     this.state.limits = { ...this.state.limits, ...input }; this.save(); this.audit('limits_changed', input); return this.state.limits;
@@ -207,6 +232,72 @@ class FleetController {
     const task = { id: randomUUID(), title: input.title.trim(), issue: input.issue, priority: ['P0', 'P1', 'P2'].includes(input.priority) ? input.priority : 'P1', files, dependencies, status: 'proposed', agentId: null, createdAt: new Date(this.now()).toISOString(), acceptance: 'NOT_ASSESSED' };
     this.state.tasks.push(task); this.save(); this.audit('task_proposed', { id: task.id, issue: task.issue }); return task;
   }
+  async addAgent(input) {
+    return this.serial(async () => {
+      const blocker = this.guard({ requireRunning: false }); if (blocker) throw Error(blocker);
+      if (['pending', 'uncertain'].includes(this.state.provisioning?.status)) throw Error('An earlier native spawn needs reconciliation before another');
+      if (typeof this.adapter.provisionSelection !== 'function') throw Error('AO agent creation is unavailable');
+      const selection = validateAgentInput(input, await this.providers());
+      if (selection.harness === 'codex') {
+        const codexGate = this.guard({ requireRunning: false, session: { harness: 'codex' } });
+        if (codexGate) throw Error(codexGate);
+      } else {
+        if (input.acknowledgeUnknownAgyQuota !== true) throw Error('Acknowledge that AGY quota has no verified automatic cutoff');
+        await this.verifyAgyQuota();
+      }
+      const sessions = await this.sessions(), live = sessions.filter(active);
+      if (live.length >= this.state.limits.maxAgents) throw Error('Maximum project agent count reached; adjust the limit while paused');
+      if (selection.kind === 'orchestrator' && live.some(s => s.kind === 'orchestrator')) throw Error('The BabyTracker orchestrator already exists; add workers instead');
+      const generation = this.state.generation;
+      let spawned, submitted = false;
+      try {
+        spawned = await this.adapter.provisionSelection(selection, record => {
+          if (generation !== this.state.generation || ['emergency', 'draining'].includes(this.state.mode)) throw Error('Provisioning stopped before native spawn');
+          submitted = true;
+          this.state.provisioning = { status: 'pending', at: new Date(this.now()).toISOString(), selection: {
+            name: selection.name, harness: selection.harness, kind: selection.kind, model: selection.model
+          }, previousIds: record.existingIds };
+          this.save(); this.audit('agent_spawn_submitting', { harness: selection.harness, name: selection.name });
+        });
+        if (!spawned || typeof spawned.id !== 'string') throw Error('AO session identity unavailable after spawn');
+        if (generation !== this.state.generation && ['emergency','draining'].includes(this.state.mode)) {
+          try { await this.adapter.command('kill', spawned.id); }
+          catch (error) {
+            if (this.state.emergency) { this.state.emergency.phase = 'unverified'; this.save(); }
+            this.audit('late_spawn_shutdown_unverified', { id: spawned.id });
+          }
+          throw Error('Spawn raced a stop; inspect the BabyTracker session');
+        }
+        this.state.provisioning = { status: 'verified', id: spawned.id, at: new Date(this.now()).toISOString(),
+          selection: { name: selection.name, harness: selection.harness, kind: selection.kind, model: selection.model } };
+        this.save(); this.audit('agent_spawn_verified', { id: spawned.id, harness: selection.harness, model: selection.model });
+        return { ok: true, sessionId: spawned.id, note: selection.harness === 'agy'
+          ? 'Verified AGY agent created. No task sent. Google quota cutoff is unverified: manual dispatch only.'
+          : 'Verified Codex agent created. No prompt or task sent.' };
+      } catch (error) {
+        if (submitted && this.state.provisioning?.status === 'pending') {
+          this.state.provisioning.status = 'uncertain'; this.state.provisioning.reason = String(error.message).slice(0, 180);
+          this.save(); this.audit('agent_spawn_uncertain', { harness: selection.harness });
+          throw Error('Native spawn delivery is unverified; reconcile before retrying. ' + error.message);
+        }
+        throw error;
+      }
+    });
+  }
+  async reconcileAgentSpawn() {
+    return this.serial(async () => {
+      const pending = this.state.provisioning;
+      if (!pending || !['pending', 'uncertain'].includes(pending.status)) throw Error('No uncertain spawn to reconcile');
+      const sessions = await this.sessions(), previousIds = new Set(pending.previousIds || []);
+      const found = sessions.filter(s => !previousIds.has(s.id) && active(s) && s.projectId === PROJECT &&
+        s.harness === pending.selection?.harness && s.kind === pending.selection?.kind &&
+        s.displayName === pending.selection?.name);
+      if (found.length !== 1) throw Error('Exactly one new project-owned session could not be verified. No retry performed.');
+      pending.status = 'verified'; pending.id = found[0].id; delete pending.previousIds; delete pending.reason;
+      pending.at = new Date(this.now()).toISOString(); this.save(); this.audit('agent_spawn_reconciled', { id: found[0].id });
+      return { ok: true, sessionId: found[0].id, note: 'Verified an existing BabyTracker agent without creating a duplicate.' };
+    });
+  }
   async assign(taskId, agentId) {
     return this.serial(async () => {
       const task = this.state.tasks.find(t => t.id === taskId); if (!task || !['proposed', 'queued'].includes(task.status)) throw Error('Only a proposed/queued task can be assigned');
@@ -217,13 +308,14 @@ class FleetController {
       task.agentId = agentId; task.status = 'queued'; this.save(); this.audit('task_assigned', { taskId, agentId }); return task;
     });
   }
-  async dispatch(id, kind = 'find-work') {
+  async dispatch(id, kind = 'find-work', { manualAgy = false } = {}) {
     return this.serial(async () => {
       const generation = this.state.generation;
       let blocker = this.guard(); if (blocker) throw Error(blocker);
       const sessions = await this.sessions(), s = sessions.find(x => x.id === id);
       if (!s || !idle(s)) throw Error('Only an idle BabyTracker agent can receive a new bounded instruction');
-      blocker = this.guard({ session: s }); if (blocker) throw Error(blocker);
+      blocker = this.guard({ session: s, manualAgy }); if (blocker) throw Error(blocker);
+      if (s.harness === 'agy') await this.verifyAgyQuota();
       if (this.occupiedSlots(sessions).size >= this.state.limits.concurrency) throw Error('Concurrency target reached; pending submissions count until runtime state settles');
       const primary = sessions.find(x => x.kind === 'orchestrator' && active(x))?.id || 'the BabyTracker integration owner';
       const task = this.state.tasks.find(t => t.agentId === id && t.status === 'queued');
@@ -240,8 +332,8 @@ class FleetController {
       try {
         await this.adapter.command('send', id, message, current => {
           if (generation !== this.state.generation) throw Error('Dispatch superseded by a stop');
-          if (current && (current.projectId !== PROJECT || !idle(current) || current.harness !== 'codex')) throw Error('Current runtime identity/activity changed before submission');
-          const reason = this.guard({ session: s });
+          if (current && (current.projectId !== PROJECT || !idle(current) || current.harness !== s.harness)) throw Error('Current runtime identity/activity changed before submission');
+          const reason = this.guard({ session: s, manualAgy });
           // This reservation already consumes one dispatch; allow exactly the final unit.
           if (reason && !(reason === 'Configured run budget is exhausted' && this.state.run?.dispatches === this.state.limits.maxDispatches && this.now() < this.state.run.deadline)) throw Error(reason);
         });
@@ -257,14 +349,14 @@ class FleetController {
   }
   async allHands() {
     const sessions = await this.sessions(); const results = [];
-    for (const s of sessions.filter(idle)) {
+    for (const s of sessions.filter(s => idle(s) && s.harness === 'codex')) {
       if (this.guard()) break;
       try { results.push({ id: s.id, ...(await this.dispatch(s.id)) }); }
       catch (e) { results.push({ id: s.id, ok: false, error: e.message }); }
       // Count submitted turns too: the daemon may not yet reflect their activity.
       if (results.filter(r => r.ok).length >= this.state.limits.concurrency) break;
     }
-    return { results, note: 'One bounded pass; no new agents were provisioned.' };
+    return { results, note: 'One bounded Codex-only pass. AGY is excluded from automatic All Hands because its quota cutoff is not verified.' };
   }
   occupiedSlots(sessions) {
     const occupied = new Set(sessions.filter(busy).map(s => s.id));
@@ -279,7 +371,7 @@ class FleetController {
     const selection = validateSelection(input, await this.providers());
     this.state.plans[id] = { ...selection, status: 'staged', at: new Date(this.now()).toISOString() }; this.save();
     this.audit('model_plan_staged', { id, harness: selection.harness, model: selection.model });
-    return { ok: true, note: 'Plan saved. Runtime replacement is not implemented; the running model was not changed.' };
+    return { ok: true, note: 'Plan staged. Running agent and model have NOT changed. Use Add Agent for an applied model on a new session.' };
   }
   turbo(enabled) {
     if (typeof enabled !== 'boolean') throw Error('Turbo state must be boolean');
@@ -303,11 +395,27 @@ class FleetController {
       } else if (this.state.mode === 'running') {
         const reason = this.guard();
         if (reason) { this.pause(reason); return; }
+        // Keep the original automatic Codex quota pause. An AGY-only fleet
+        // may continue manual turns independently, but Turbo is never allowed
+        // to work around exhausted or stale Codex account telemetry.
+        const codexGate = this.guard({ session: { harness: 'codex' } });
+        if (codexGate) {
+          const sessions = await this.sessions();
+          if (!sessions.some(s => active(s) && s.harness === 'agy')) {
+            this.pause(codexGate); return;
+          }
+          if (this.state.run?.turbo) {
+            this.state.run.turbo = false; this.save();
+            this.audit('codex_turbo_disabled', { reason: codexGate });
+          }
+        }
         if (this.state.run?.turbo && this.now() >= (this.nextDispatchAt || 0)) {
           this.nextDispatchAt = this.now() + 120000;
           // Automatic mode only dispatches explicitly assigned queue entries.
           // It never invents or repeatedly requests new work when the queue is empty.
-          const tasks = this.state.tasks.filter(t => t.status === 'queued' && t.agentId).sort((a, b) => a.priority.localeCompare(b.priority));
+          const sessions = await this.sessions();
+          const codexIds = new Set(sessions.filter(s => s.harness === 'codex').map(s => s.id));
+          const tasks = this.state.tasks.filter(t => t.status === 'queued' && codexIds.has(t.agentId)).sort((a, b) => a.priority.localeCompare(b.priority));
           for (const t of tasks.slice(0, this.state.limits.concurrency)) {
             if (this.guard()) break;
             try { await this.dispatch(t.agentId); } catch (e) { this.audit('automatic_dispatch_blocked', { taskId: t.id, reason: e.message }); }

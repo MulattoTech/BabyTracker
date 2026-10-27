@@ -4,6 +4,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { PROJECT } = require('./config');
 const { provisionFirstCodex } = require('./bootstrap');
+const { provisionAgent } = require('./agent-provision');
 const exec = promisify(execFile);
 
 class AOAdapter {
@@ -21,6 +22,9 @@ class AOAdapter {
   }
   async provisionCodex(onSubmit = () => {}) {
     return provisionFirstCodex(this.config, { runner: this.runner, sessions: () => this.sessions(), onSubmit });
+  }
+  async provisionSelection(selection, onSubmit = () => {}) {
+    return provisionAgent(this.config, { runner: this.runner, sessions: () => this.sessions(), selection, onSubmit });
   }
   async command(action, id, message, beforeSubmit = () => {}) {
     if (!this.config.runtimeVerified) throw Error('The BabyTracker Orchestrator project/repository binding has not been verified');

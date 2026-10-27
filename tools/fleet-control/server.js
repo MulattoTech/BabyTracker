@@ -6,7 +6,8 @@ const { randomBytes, randomUUID, timingSafeEqual } = require('node:crypto');
 const { configFromEnvironment } = require('./config');
 const { AOAdapter, quotaSnapshot } = require('./adapter');
 const { FleetController } = require('./controller');
-const { createProviderRuntime } = require('./vendor/mjobs/provider-catalog');
+const { createSharedProviders } = require('./multi-provider');
+const { createProjectHub } = require('./project-hub');
 
 function acquireLock(directory) {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -38,9 +39,9 @@ function json(res, code, value) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value));
 }
 
-function createServer({ config, controller, onRestart = null }) {
+function createServer({ config, controller, onRestart = null, projectsReader = async () => ({ projects: [] }) }) {
   const token = randomBytes(32).toString('hex');
-  const staticFiles = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/mjobs-style.css': ['mjobs-style.css', 'text/css; charset=utf-8'], '/babytracker.css': ['babytracker.css', 'text/css; charset=utf-8'] };
+  const staticFiles = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/mjobs-style.css': ['mjobs-style.css', 'text/css; charset=utf-8'], '/babytracker.css': ['babytracker.css', 'text/css; charset=utf-8'], '/projects': ['projects.html', 'text/html; charset=utf-8'], '/projects.js': ['projects.js', 'text/javascript; charset=utf-8'] };
   let closing = false;
   const server = http.createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -57,6 +58,7 @@ function createServer({ config, controller, onRestart = null }) {
         if (url.pathname === '/api/session') return json(res, 200, { token });
         if (url.pathname === '/api/state') return json(res, 200, await controller.snapshot());
         if (url.pathname === '/api/providers') return json(res, 200, await controller.providers());
+        if (url.pathname === '/api/projects') return json(res, 200, await projectsReader());
         const item = staticFiles[url.pathname];
         if (item) { res.writeHead(200, { 'Content-Type': item[1] }); return res.end(fs.readFileSync(path.join(__dirname, 'public', item[0]))); }
         return json(res, 404, { error: 'Not found' });
@@ -78,8 +80,10 @@ function createServer({ config, controller, onRestart = null }) {
         case 'drain': result = await controller.stop(false); break;
         case 'emergency': result = await controller.stop(true); break;
         case 'release': result = await controller.releaseEmergency(); break;
-        case 'nudge': result = await controller.dispatch(input.id, 'nudge'); break;
-        case 'find-work': result = await controller.dispatch(input.id); break;
+        case 'nudge': result = await controller.dispatch(input.id, 'nudge', { manualAgy: input.acknowledgeUnknownAgyQuota === true }); break;
+        case 'find-work': result = await controller.dispatch(input.id, 'find-work', { manualAgy: input.acknowledgeUnknownAgyQuota === true }); break;
+        case 'add-agent': result = await controller.addAgent(input.agent); break;
+        case 'reconcile-agent': result = await controller.reconcileAgentSpawn(); break;
         case 'all-hands': result = await controller.allHands(); break;
         case 'turbo': result = controller.turbo(input.enabled); break;
         case 'limits': result = controller.limits(input.limits); break;
@@ -104,10 +108,10 @@ function createServer({ config, controller, onRestart = null }) {
 function main() {
   const config = configFromEnvironment();
   const release = acquireLock(config.stateDir);
-  const providers = createProviderRuntime({ codexModels: config.codexModels, codexEfforts: ['low', 'medium', 'high', 'xhigh'], codexExe: config.codexExe });
-  const controller = new FleetController(config, { adapter: new AOAdapter(config), quota: () => quotaSnapshot(config.quotaFile), providers: async () => {
+  const providers = createSharedProviders(config);
+  const controller = new FleetController(config, { adapter: new AOAdapter(config), quota: () => quotaSnapshot(config.quotaFile), agyUsage: () => providers.usage(), providers: async () => {
     const value = await providers.get();
-    return { ...value, source: 'Configured Codex model choices and locally detected provider executables; model plans do not replace running agents.' };
+    return { ...value, source: 'MJobs verified Codex model catalog (read-only), local AGY model availability. Existing agent plans remain staged only.' };
   } });
   let ending = false;
   const stop = code => {
@@ -116,7 +120,7 @@ function main() {
     server.close(() => { release(); process.exit(code); });
     setTimeout(() => { release(); process.exit(code); }, 5000).unref();
   };
-  const server = createServer({ config, controller, onRestart: process.send ? () => { process.send({ type: 'babytracker-restart' }); stop(75); } : null });
+  const server = createServer({ config, controller, projectsReader: createProjectHub(config, controller), onRestart: process.send ? () => { process.send({ type: 'babytracker-restart' }); stop(75); } : null });
   const timer = setInterval(() => controller.tick(), 5000); timer.unref();
   server.on('error', e => { release(); console.error('BabyTracker Fleet: ' + e.message); process.exitCode = 1; clearInterval(timer); });
   process.on('SIGINT', () => stop(0)); process.on('SIGTERM', () => stop(0));
