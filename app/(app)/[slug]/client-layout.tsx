@@ -900,6 +900,8 @@ function AppContent({ children }: { children: React.ReactNode }) {
                           ? t('Calendar')
                           : pathname?.includes('/reports')
                           ? t('Reports')
+                          : pathname?.includes('/ocr-import')
+                          ? t('Document import')
                           : t('Full Log')}
                       </h1>
                     </div>

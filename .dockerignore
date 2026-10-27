@@ -5,6 +5,15 @@ node_modules
 
 # Testing
 coverage
+test-results/
+tests/
+
+# Never copy runtime infant files or local databases into an application image
+Files/
+*.db
+*.db-shm
+*.db-wal
+.env*
 
 # Next.js
 .next/
