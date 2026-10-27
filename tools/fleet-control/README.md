@@ -22,7 +22,9 @@ It **does not load MJobs runtime state or install its machine-wide kill scripts*
   fresh verification that project sessions stopped clears it.
 - Every native mutation checks live session membership immediately before
   execution. No global process kill, AO-daemon stop, shell command execution,
-  worker spawn, host modification or production database access is implemented.
+  host modification or production database access is implemented. Only one verified
+  Codex orchestrator can be bootstrapped by an explicit Start action; no other
+  agent is provisioned and no initial task is sent.
 - Protected loopback API: Host/origin checks, per-instance action token, JSON
   requests, body limit, CSP and no CORS. The supervisor restarts only its own child.
 
@@ -33,7 +35,8 @@ the correct checkout. No model inference is used for dashboard reads.
 
 ## Explicitly incomplete
 
-New worker provisioning, worker-model replacement, live project-binding discovery,
+Dynamic worker provisioning beyond a single Start-triggered Codex orchestrator,
+worker-model replacement, general live project-binding discovery,
 Gemini quota verification, per-turn token/duration analytics, disk I/O, acceptance
 evidence ingestion, automated GitHub task discovery and full Mission Control proxy
 integration are not implemented in this slice. The UI marks unsupported metrics
@@ -106,6 +109,16 @@ available sessions, supported provider executable/models and fresh quota feed.
 `quota-guard-status.json` **read-only**; it is not a BabyTracker spending ledger.
 It must contain fresh `heartbeatAt`, `lastSuccessfulPoll`, healthy `status` and
 finite unexpired `windows[].remainingPercent`. No credentials are read.
+
+When Start is clicked and no active BabyTracker Codex session exists, the
+controller verifies AO's live project ID, real checkout path, canonical GitHub
+remote and Codex authorization, then asks AO to spawn precisely one Codex
+orchestrator using its native isolated worktree. The first native call is
+recorded before submission; uncertain outcomes block repeat spawning. Merely
+opening the dashboard or booting Windows never creates an agent. Start does
+not assign a task; select an available agent's Find Work or explicitly assign
+one of the real queued issues to initiate a bounded turn. Starting Codex may
+consume provider allowance, so Start requires explicit confirmation.
 
 Then start a bounded run explicitly. Default limits are 2 concurrent turns,
 8 dispatches, 60 minutes, 20% minimum remaining allowance and 4 GiB free RAM.

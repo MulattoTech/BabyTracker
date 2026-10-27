@@ -77,7 +77,7 @@ class FleetController {
       else if (idle(s)) label = 'Available for Dispatch';
       return { id: s.id, projectId: PROJECT, name: s.displayName || s.id, kind: s.kind || 'worker', harness: s.harness || 'unknown', model: s.model || 'unknown', effort: s.effort || null, label, busy: busy(s), idle: idle(s), taskId: task?.id || null, issue: task?.issue || null, prs: (s.prs || []).map(p => ({ number: p.number, state: p.state, ci: p.ci, url: typeof p.url === 'string' && p.url.startsWith('https://github.com/' + SOURCE_REPO + '/') ? p.url : null })), cooldownSeconds: Math.ceil(cooldown / 1000), dispatchEta: cooldown > 0 ? new Date(now + cooldown).toISOString() : null, unresolvedDelivery: !!ambiguous, tokens: null, turnStatistics: null, lastActivity: s.activity?.timestamp || null };
     });
-    const result = { observedAt: new Date(now).toISOString(), projectId: PROJECT, sourceRepository: SOURCE_REPO, issueRepository: ISSUE_REPO, mode: this.state.mode, runtime, sessions: rows, tasks: this.state.tasks, plans: this.state.plans, limits: this.state.limits, run: this.state.run, quota: this.quota(), resources: this.resources(), dispatchBlocker: this.guard(), emergency: this.state.emergency, summary: { total: rows.length, working: rows.filter(x => x.busy).length, available: rows.filter(x => x.label === 'Available for Dispatch').length, blocked: rows.filter(x => x.label === 'Blocked').length }, acceptance: { status: 'NOT_ASSESSED', percent: null, note: 'Task completion is separate from requirement acceptance; no acceptance evidence has been imported.' }, capabilities: { scopedControl: true, persistentQueue: true, boundedDispatch: true, independentReviewGate: true, modelPlans: true, modelReplacement: false, dynamicProvisioning: false, geminiBudget: false, diskIO: false, perAgentTokens: false } };
+    const result = { observedAt: new Date(now).toISOString(), projectId: PROJECT, sourceRepository: SOURCE_REPO, issueRepository: ISSUE_REPO, mode: this.state.mode, runtime, sessions: rows, tasks: this.state.tasks, plans: this.state.plans, limits: this.state.limits, run: this.state.run, quota: this.quota(), resources: this.resources(), dispatchBlocker: this.guard(), emergency: this.state.emergency, summary: { total: rows.length, working: rows.filter(x => x.busy).length, available: rows.filter(x => x.label === 'Available for Dispatch').length, blocked: rows.filter(x => x.label === 'Blocked').length }, acceptance: { status: 'NOT_ASSESSED', percent: null, note: 'Task completion is separate from requirement acceptance; no acceptance evidence has been imported.' }, capabilities: { scopedControl: true, persistentQueue: true, boundedDispatch: true, independentReviewGate: true, modelPlans: true, modelReplacement: false, firstCodexBootstrap: typeof this.adapter.provisionCodex === 'function', dynamicProvisioning: false, geminiBudget: false, diskIO: false, perAgentTokens: false } };
     this.lastSnapshot = result; return result;
   }
   async serial(fn) {
@@ -90,15 +90,54 @@ class FleetController {
       if (this.state.mode === 'running') throw Error('Pause before explicitly starting a new bounded run');
       if (this.state.mode === 'draining') throw Error('Graceful shutdown is still in progress; wait for it to finish');
       const blocker = this.guard({ requireRunning: false }); if (blocker) throw Error(blocker);
-      const generation = this.state.generation;
-      const sessions = await this.sessions();
-      if (!sessions.some(s => active(s) && s.harness === 'codex')) throw Error('No verified BabyTracker Codex session exists. Provisioning is not yet enabled.');
-      if (generation !== this.state.generation || this.state.mode === 'emergency') throw Error('Start superseded by a stop');
+      // A persistent pending/uncertain bootstrap must be reconciled before any
+      // new CLI spawn. A failed/slow response may already have created a worker.
       if (Object.values(this.ledger.entries).some(r => ['reserved', 'uncertain'].includes(r.status))) throw Error('Unresolved delivery requires manual reconciliation before startup');
+      const generation = this.state.generation;
+      let sessions = await this.sessions();
+      let createdSessionId = null;
+      if (!sessions.some(s => active(s) && s.harness === 'codex')) {
+        if (['pending', 'uncertain'].includes(this.state.bootstrap?.status)) throw Error('An earlier Codex bootstrap has unverified delivery. Inspect AO sessions before retrying.');
+        if (typeof this.adapter.provisionCodex !== 'function') throw Error('No verified BabyTracker Codex session exists; provisioning adapter is unavailable.');
+        let provisioned;
+        try {
+          provisioned = await this.adapter.provisionCodex(() => {
+            if (generation !== this.state.generation || this.state.mode === 'emergency') throw Error('Start was interrupted before provisioning');
+            this.state.bootstrap = { status: 'pending', startedAt: new Date(this.now()).toISOString() };
+            this.save(); this.audit('codex_bootstrap_submitting');
+          });
+          if (!provisioned || typeof provisioned.id !== 'string') throw Error('Provisioner returned no session identity');
+          createdSessionId = provisioned.created ? provisioned.id : null;
+          this.state.bootstrap = { status: 'verified', sessionId: provisioned.id, verifiedAt: new Date(this.now()).toISOString() };
+          this.save(); this.audit('codex_bootstrap_verified', { sessionId: provisioned.id, created: !!provisioned.created });
+          sessions = await this.sessions();
+          if (generation === this.state.generation && this.state.mode !== 'emergency' && !sessions.some(s => s.id === provisioned.id && active(s) && s.harness === 'codex')) {
+            throw Error('The provisioned BabyTracker session is no longer live');
+          }
+        } catch (error) {
+          if (this.state.bootstrap?.status === 'pending' || (this.state.bootstrap?.status === 'verified' && createdSessionId)) {
+            this.state.bootstrap = { status: 'uncertain', at: new Date(this.now()).toISOString() };
+            this.save(); this.audit('codex_bootstrap_unverified', { reason: String(error.message).slice(0, 180) });
+            throw Error('Codex bootstrap delivery is unverified. Inspect AO sessions before retrying: ' + error.message);
+          }
+          throw error;
+        }
+      }
+      if (generation !== this.state.generation || this.state.mode === 'emergency') {
+        if (this.state.mode === 'emergency' && createdSessionId && sessions.some(s => s.id === createdSessionId && active(s))) {
+          try { await this.adapter.command('kill', createdSessionId); }
+          catch (error) {
+            if (this.state.emergency) { this.state.emergency.phase = 'unverified'; this.save(); }
+            this.audit('codex_bootstrap_emergency_exit_unverified', { reason: String(error.message).slice(0, 180) });
+          }
+        }
+        throw Error('Start superseded by a stop; dispatch remains disabled');
+      }
+      const freshBlocker = this.guard({ requireRunning: false }); if (freshBlocker) throw Error(freshBlocker);
       this.state.mode = 'running'; this.state.generation++;
       this.state.run = { id: randomUUID(), startedAt: new Date(this.now()).toISOString(), deadline: this.now() + this.state.limits.maxMinutes * 60000, dispatches: 0, turbo: false };
       this.save(); this.audit('fleet_started', { runId: this.state.run.id });
-      return { ok: true, note: 'Bounded dispatch enabled. No task was sent by Start Fleet.' };
+      return { ok: true, note: createdSessionId ? 'One verified BabyTracker Codex orchestrator was created. Bounded dispatch is enabled; no task was automatically sent.' : 'Bounded dispatch enabled using an existing BabyTracker Codex session. No task was sent by Start Fleet.' };
     });
   }
   pause(reason = 'User paused dispatch') {

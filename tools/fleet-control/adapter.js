@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { PROJECT } = require('./config');
+const { provisionFirstCodex } = require('./bootstrap');
 const exec = promisify(execFile);
 
 class AOAdapter {
@@ -17,6 +18,9 @@ class AOAdapter {
     const value = await response.json();
     if (!Array.isArray(value.sessions)) throw Error('Orchestrator session response is invalid');
     return value.sessions;
+  }
+  async provisionCodex(onSubmit = () => {}) {
+    return provisionFirstCodex(this.config, { runner: this.runner, sessions: () => this.sessions(), onSubmit });
   }
   async command(action, id, message, beforeSubmit = () => {}) {
     if (!this.config.runtimeVerified) throw Error('The BabyTracker Orchestrator project/repository binding has not been verified');
