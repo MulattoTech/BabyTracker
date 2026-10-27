@@ -23,10 +23,54 @@ const env = { ...process.env, DATABASE_URL: databaseUrl, LOG_DATABASE_URL: `file
   ENABLE_NOTIFICATIONS: 'false', ENABLE_LOG: 'false', NEXT_TELEMETRY_DISABLED: '1', COOKIE_SECURE: 'false' };
 const reportDir = path.join(process.cwd(), 'test-results');
 mkdirSync(reportDir, { recursive: true });
-let server, browser, db;
+let server, serverLifecycle, browser, browserServer, browserLifecycle, db, failure;
 let output = '';
 const documents = [];
 const report = { syntheticOnly: true, startedAt: new Date().toISOString(), checks: [], screenshots: [] };
+
+async function bounded(promise, milliseconds, label) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} exceeded its cleanup deadline`)), milliseconds);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+function trackOwnedProcess(child) {
+  // Subscribe immediately: an already-exited child will never emit exit again.
+  let spawnError;
+  const exit = new Promise(resolve => child.once('exit', resolve));
+  const close = new Promise(resolve => child.once('close', resolve));
+  child.once('error', error => { spawnError = error; });
+  return { child, exit, close, get exited() { return child.exitCode !== null || child.signalCode !== null; }, get spawnError() { return spawnError; } };
+}
+
+async function stopOwnedProcess(lifecycle, label) {
+  if (!lifecycle) return { exited: true, forced: false };
+  const { child } = lifecycle;
+  let forced = false;
+  try {
+    if (!lifecycle.exited && child.pid) {
+      child.kill('SIGTERM');
+      await bounded(lifecycle.exit, 3000, `${label} graceful shutdown`).catch(() => {});
+      if (!lifecycle.exited) {
+        forced = true;
+        child.kill('SIGKILL');
+        await bounded(lifecycle.exit, 5000, `${label} forced shutdown`);
+      }
+    }
+    assert.ok(lifecycle.exited || lifecycle.spawnError, `${label} termination was not verified`);
+    // Close only this owned child's pipes; no name-based or global termination.
+    for (const stream of child.stdio || []) stream?.destroy?.();
+    await bounded(lifecycle.close, 2000, `${label} pipe closure`);
+    return { exited: true, forced };
+  } finally {
+    for (const stream of child.stdio || []) stream?.destroy?.();
+    // An unkillable child must produce FAIL, but must not hold the reporter open.
+    if (!lifecycle.exited && child.pid) child.unref();
+  }
+}
 
 try {
   execFileSync(process.execPath, ['node_modules/prisma/build/index.js', 'migrate', 'deploy'], { env, stdio: 'pipe', timeout: 60_000 });
@@ -43,17 +87,28 @@ try {
   await new Promise(resolve => socket.close(resolve));
   const base = `http://127.0.0.1:${port}`;
   server = spawn(process.execPath, ['node_modules/next/dist/bin/next', 'start', '-H', '127.0.0.1', '-p', String(port)], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  serverLifecycle = trackOwnedProcess(server);
   server.stdout.on('data', chunk => { output = (output + chunk).slice(-20000); });
   server.stderr.on('data', chunk => { output = (output + chunk).slice(-20000); });
-  for (let attempt = 0; ; attempt++) {
-    try { await fetch(base); break; } catch {
-      if (attempt > 100) throw new Error('Synthetic app did not start.');
+  const readyDeadline = Date.now() + 30_000;
+  for (;;) {
+    if (serverLifecycle.spawnError || serverLifecycle.exited) throw new Error('Synthetic app exited before readiness.');
+    try {
+      const response = await fetch(base, { signal: AbortSignal.timeout(1500) });
+      await response.body?.cancel();
+      if (response.status >= 500) throw new Error('Synthetic app is not ready.');
+      break;
+    } catch {
+      if (Date.now() >= readyDeadline) throw new Error('Synthetic app did not start within 30 seconds.');
       await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
-  assert.equal((await fetch(`${base}/api/ocr/documents?babyId=${baby.id}`)).status, 401);
+  const unauthenticated = await fetch(`${base}/api/ocr/documents?babyId=${baby.id}`, { signal: AbortSignal.timeout(5000) });
+  assert.equal(unauthenticated.status, 401); await unauthenticated.body?.cancel();
   report.checks.push('Unauthenticated document access rejected');
-  browser = await chromium.launch({ headless: true, executablePath: process.env.BABYTRACKER_TEST_BROWSER_PATH || undefined });
+  browserServer = await chromium.launchServer({ headless: true, executablePath: process.env.BABYTRACKER_TEST_BROWSER_PATH || undefined, timeout: 30_000 });
+  browserLifecycle = trackOwnedProcess(browserServer.process());
+  browser = await chromium.connect(browserServer.wsEndpoint(), { timeout: 15_000 });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1100 } });
   await context.addInitScript(({ token, family, baby, caretakerId }) => {
     localStorage.setItem('authToken', token); localStorage.setItem('unlockTime', String(Date.now()));
@@ -103,38 +158,60 @@ try {
   const feed = await db.feedLog.findFirstOrThrow();
   assert.equal(feed.amount, 95); assert.equal(feed.unitAbbr, 'ML'); assert.equal(feed.time.toISOString(), '2026-10-20T13:15:00.000Z');
   assert.equal(await db.diaperLog.count(), 1);
-  const timeline = await fetch(`${base}/api/timeline?babyId=${baby.id}&startDate=2026-10-20T00:00:00Z&endDate=2026-10-21T00:00:00Z`, { headers: { Authorization: `Bearer ${token}` } });
+  const timeline = await fetch(`${base}/api/timeline?babyId=${baby.id}&startDate=2026-10-20T00:00:00Z&endDate=2026-10-21T00:00:00Z`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000) });
   assert.equal(timeline.status, 200);
   assert.match(await timeline.text(), /95/);
   report.checks.push('Corrected approved feed/diaper values appear in ordinary Sprout timeline');
   const userToken = jwt.sign({ id: caretaker.id, name: caretaker.name, role: 'USER', familyId: family.id, familySlug: family.slug }, secret, { expiresIn: '5m' });
-  assert.equal((await fetch(`${base}/api/ocr/documents?babyId=${baby.id}`, { headers: { Authorization: `Bearer ${userToken}` } })).status, 403);
+  const denied = await fetch(`${base}/api/ocr/documents?babyId=${baby.id}`, { headers: { Authorization: `Bearer ${userToken}` }, signal: AbortSignal.timeout(5000) });
+  assert.equal(denied.status, 403); await denied.body?.cancel();
   report.checks.push('Non-admin import access rejected');
   assert.deepEqual(pageErrors, [], 'Browser JavaScript errors');
-  report.status = 'PASS';
-  console.log(JSON.stringify({ status: report.status, checks: report.checks, screenshots: report.screenshots }, null, 2));
+  report.browserChecksPassed = true;
 } catch (error) {
-  report.status = 'FAIL'; report.error = error.message;
-  // Only the synthetic test server writes this log; never attach production logs.
-  writeFileSync(path.join(reportDir, 'ocr-browser-server.log'), output);
-  throw error;
+  failure = error; report.error = error.message;
 } finally {
-  report.completedAt = new Date().toISOString();
-  writeFileSync(path.join(reportDir, 'ocr-browser-report.json'), JSON.stringify(report, null, 2));
-  await browser?.close();
-  if (server) {
-    server.kill('SIGTERM');
-    await Promise.race([new Promise(resolve => server.once('exit', resolve)), new Promise(resolve => setTimeout(resolve, 2000))]);
-  }
-  // Clean encrypted synthetic sources by exact names from this disposable database.
-  if (db) {
-    for (const id of documents) {
-      const doc = await db.ocrDocument.findUnique({ where: { id } });
-      for (const file of [doc?.sourceFile, ...JSON.parse(doc?.previewFiles || '[]').map(page => page.file)].filter(Boolean)) {
-        if (/^[a-f\d-]{36}\.enc$/i.test(file)) rmSync(path.join(env.BABYTRACKER_OCR_FILES_DIR, file), { force: true });
+  const cleanupErrors = [];
+  report.cleanup = {};
+  try {
+    if (browser) await bounded(browser.close(), 5000, 'Browser connection closure');
+  } catch (error) { report.cleanup.browserGracefulCloseTimedOut = true; }
+  try {
+    if (browserServer) {
+      try {
+        try { await bounded(browserServer.close(), 5000, 'Owned browser shutdown'); }
+        catch { await bounded(browserServer.kill(), 5000, 'Owned browser forced shutdown'); }
+      } finally {
+        report.cleanup.browser = await stopOwnedProcess(browserLifecycle, 'Synthetic browser');
       }
     }
-    await db.$disconnect();
+  } catch (error) { cleanupErrors.push(error.message); }
+  try { report.cleanup.server = await stopOwnedProcess(serverLifecycle, 'Synthetic Next server'); }
+  catch (error) { cleanupErrors.push(error.message); }
+  try {
+    // Clean encrypted synthetic sources by exact names from this disposable database.
+    if (db) {
+      for (const id of documents) {
+        const doc = await bounded(db.ocrDocument.findUnique({ where: { id } }), 5000, 'Synthetic source lookup');
+        for (const file of [doc?.sourceFile, ...JSON.parse(doc?.previewFiles || '[]').map(page => page.file)].filter(Boolean)) {
+          if (/^[a-f\d-]{36}\.enc$/i.test(file)) rmSync(path.join(env.BABYTRACKER_OCR_FILES_DIR, file), { force: true });
+        }
+      }
+    }
+  } catch (error) { cleanupErrors.push(error.message); }
+  try { if (db) await bounded(db.$disconnect(), 5000, 'Synthetic database disconnect'); }
+  catch (error) { cleanupErrors.push(error.message); }
+  try { if (!serverLifecycle || serverLifecycle.exited || serverLifecycle.spawnError) rmSync(scratch, { recursive: true, force: true }); }
+  catch (error) { cleanupErrors.push(error.message); }
+  report.cleanup.errors = cleanupErrors;
+  report.status = failure || cleanupErrors.length ? 'FAIL' : 'PASS';
+  report.completedAt = new Date().toISOString();
+  if (report.status === 'FAIL') {
+    // Only the synthetic test server writes this log; never attach production logs.
+    writeFileSync(path.join(reportDir, 'ocr-browser-server.log'), output);
+    process.exitCode = 1;
   }
-  rmSync(scratch, { recursive: true, force: true });
+  writeFileSync(path.join(reportDir, 'ocr-browser-report.json'), JSON.stringify(report, null, 2));
+  // PASS is emitted only after owned processes exited and cleanup completed.
+  console.log(JSON.stringify({ status: report.status, checks: report.checks, screenshots: report.screenshots, cleanup: report.cleanup, error: report.error }, null, 2));
 }
