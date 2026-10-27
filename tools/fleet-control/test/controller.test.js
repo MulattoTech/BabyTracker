@@ -14,9 +14,16 @@ function fixture(t, options = {}) {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   let time = Date.parse('2026-10-27T10:00:00Z');
   const config = { projectId: PROJECT, sourceRepository: SOURCE_REPO, issueRepository: ISSUE_REPO, stateDir: dir, runtimeVerified: true };
-  const state = { sessions: [session('baby-worker-1'), session('baby-worker-2'), session('mjobs-worker-1', { projectId: 'mjobs-luna' })], commands: [], quota: { fresh: true, remainingPercent: 80 }, fail: false, ...options };
+  const state = { sessions: [session('baby-worker-1'), session('baby-worker-2'), session('mjobs-worker-1', { projectId: 'mjobs-luna' })], commands: [], provisions: 0, quota: { fresh: true, remainingPercent: 80 }, fail: false, ...options };
   const adapter = {
     sessions: async () => structuredClone(state.sessions),
+    provisionCodex: async (beforeSubmit = () => {}) => {
+      if (!state.bootstrap) throw Error('No verified BabyTracker Codex session exists and bootstrap is unavailable');
+      beforeSubmit(); state.provisions++;
+      if (state.bootstrap === 'uncertain') throw Error('Simulated AO provisioning transport loss');
+      state.sessions.push(session('baby-bootstrap-1', { kind: 'orchestrator', displayName: 'BabyTracker Orchestrator' }));
+      return { id: 'baby-bootstrap-1', created: true };
+    },
     command: async (action, id, message, before = () => {}) => {
       const s = state.sessions.find(s => s.id === id); before(s);
       state.commands.push({ action, id, message });
@@ -58,9 +65,56 @@ test('Start changes only local run state; it does not launch or assign a worker'
   assert.equal(f.state.commands.length, 0);
   await assert.rejects(f.controller.start(), /Pause/);
 });
-test('empty project cannot Start or provision implicit agents', async t => {
+test('no project session without available bootstrap remains paused, with no native mutation', async t => {
   const f = fixture(t, { sessions: [session('mjobs-worker', { projectId: 'mjobs-luna' })] });
-  await assert.rejects(f.controller.start(), /No verified/); assert.equal(f.state.commands.length, 0);
+  await assert.rejects(f.controller.start(), /No verified/);
+  assert.equal(f.controller.state.mode, 'paused');
+  assert.equal(f.state.provisions, 0);
+  assert.equal(f.state.commands.length, 0);
+});
+test('explicit Start provisions one BabyTracker orchestrator, never auto-sends work or touches MJobs', async t => {
+  const f = fixture(t, { sessions: [session('mjobs-worker', { projectId: 'mjobs-luna' })], bootstrap: 'success' });
+  const baseline = structuredClone(f.state.sessions[0]);
+  const result = await f.controller.start();
+  assert.match(result.note, /was created/);
+  assert.equal(f.state.provisions, 1);
+  assert.equal(f.controller.state.mode, 'running');
+  assert.equal(f.controller.state.run.dispatches, 0);
+  assert.equal(f.controller.state.bootstrap.status, 'verified');
+  assert.equal(f.state.commands.length, 0);
+  assert.deepEqual(f.state.sessions[0], baseline);
+  f.controller.pause();
+  await f.controller.start();
+  assert.equal(f.state.provisions, 1);
+});
+test('stale quota stops bootstrap before CLI; a failing submission persists an uncertain latch', async t => {
+  const f = fixture(t, { sessions: [], bootstrap: 'uncertain' });
+  f.state.quota = { fresh: false, remainingPercent: null, reason: 'stale' };
+  await assert.rejects(f.controller.start(), /stale/);
+  assert.equal(f.state.provisions, 0);
+  f.state.quota = { fresh: true, remainingPercent: 50 };
+  await assert.rejects(f.controller.start(), /unverified/);
+  assert.equal(f.state.provisions, 1);
+  assert.equal(f.controller.state.bootstrap.status, 'uncertain');
+  await assert.rejects(f.controller.start(), /unverified delivery/);
+  const restarted = new FleetController(f.config, f.deps);
+  await assert.rejects(restarted.start(), /unverified delivery/);
+  assert.equal(f.state.provisions, 1);
+});
+test('emergency during new session provisioning fences dispatch and targets only its newly created session', async t => {
+  const f = fixture(t, { sessions: [session('mjobs-worker', { projectId: 'mjobs-luna' })], bootstrap: 'success' });
+  const previous = f.adapter.provisionCodex;
+  f.adapter.provisionCodex = async beforeSubmit => {
+    const result = await previous(beforeSubmit);
+    await f.controller.stop(true);
+    return result;
+  };
+  await assert.rejects(f.controller.start(), /superseded/);
+  assert.equal(f.controller.state.mode, 'emergency');
+  assert.ok(f.state.sessions[1].isTerminated);
+  assert.equal(f.state.sessions[0].isTerminated, false);
+  assert.equal(f.state.commands.length, 1);
+  assert.equal(f.state.commands[0].id, 'baby-bootstrap-1');
 });
 test('explicit new Start works after the prior bounded run exhausted dispatches and deadline', async t => {
   const f = fixture(t); f.controller.limits({ maxDispatches: 1, maxMinutes: 1 }); await f.controller.start();
