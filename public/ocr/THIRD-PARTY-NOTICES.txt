@@ -1,0 +1,7 @@
+Local OCR runtime notices
+
+Sprout Track source is distributed under the accompanying Sprout Track License.
+Tesseract.js 7.0.0: Apache-2.0 (license included).
+Tesseract.js-core 7.0.0: Apache-2.0 (license included).
+English traineddata from naptha/tessdata (1.0.0); the trained data is Apache-2.0 (license included). The npm package wrapper is MIT-licensed.
+PDF.js (6.4.299): Apache-2.0 (license included).

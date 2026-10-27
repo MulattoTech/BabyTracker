@@ -10,6 +10,16 @@ The component supports Baby Buddy CSV exports and Huckleberry care log CSV expor
 4. reviewing the planned import;
 5. executing the import and viewing created/already-imported counts.
 
+## Photo/PDF feeding and diaper logs
+
+The experimental **Photo or PDF care log** path accepts JPEG, PNG, WebP, BMP, and PDF files. PDF.js extracts embedded text when present and renders pages locally when image recognition is needed. Tesseract.js and its English model are bundled and served by this application; uploads are not sent to a third-party OCR service. The scanned file, page preview, and raw recognized text stay in the browser. The commit request contains only selected, corrected event fields and a SHA-256 source fingerprint with page/line provenance.
+
+OCR is a rough first draft. Tesseract is not tuned for handwriting, and recognition may miss or misread entries. Caregivers must compare each selected row with its source page and explicitly mark it reviewed. Date, time, feeding method, bottle amount/unit, and diaper kind remain unresolved until chosen or corrected; the server rejects incomplete rows. Ambiguous dates and 12-hour times without AM/PM are not guessed. Nonexistent or repeated daylight-saving local times are rejected until the caregiver chooses an unambiguous time.
+
+Rows can be edited, split at a line break, merged with another row on the same page, removed, or added manually. Import writes are additive and use the existing family-scoped `ExternalImportRecord` uniqueness key for repeat-submit deduplication. Baby ownership comes from the authenticated family. The first slice recognizes feeding and diaper events only; it does not infer sleep, health, or growth records.
+
+`npm run dev` and `npm run build` run `scripts/prepare-ocr-assets.mjs` to copy pinned local worker, WebAssembly, PDF.js, and English model assets from the lockfile dependencies into `public/ocr/`. Third-party licenses and notices are copied alongside those assets. No source documents or OCR text are persisted by this path.
+
 External imports are additive. The importer does not use database restore endpoints and does not modify or delete existing Sprout Track records.
 
 ## Skipped files, activity-only children, and medication imports

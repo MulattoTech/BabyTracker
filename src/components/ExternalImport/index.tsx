@@ -16,6 +16,9 @@ import {
 import { useLocalization } from '@/src/context/localization';
 import ConfigureStep from './ConfigureStep';
 import ReviewStep from './ReviewStep';
+import LogSheetReview from './LogSheetReview';
+import { recognizeLogSheetFiles } from '@/src/lib/importers/log-sheet/recognize';
+import type { LogSheetCandidate, LogSheetSourcePage } from '@/src/lib/importers/log-sheet/types';
 import {
   ExistingBaby,
   ExternalImportProps,
@@ -25,7 +28,7 @@ import {
   ExternalImportCompletedResult,
 } from './external-import.types';
 
-type ProviderId = 'baby-buddy' | 'huckleberry';
+type ProviderId = 'baby-buddy' | 'huckleberry' | 'log-sheet-ocr';
 
 const providerOptions: readonly {
   id: ProviderId;
@@ -45,6 +48,12 @@ const providerOptions: readonly {
     description: 'Select a Huckleberry care log CSV export',
     multiple: false,
   },
+  {
+    id: 'log-sheet-ocr',
+    name: 'Photo or PDF care log',
+    description: 'Review mixed feeding and diaper log rows extracted locally from a photo or PDF page',
+    multiple: true,
+  },
 ];
 
 export default function ExternalImport({
@@ -53,6 +62,7 @@ export default function ExternalImport({
 }: ExternalImportProps) {
   const { t } = useLocalization();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const recognitionAbortRef = useRef<AbortController | null>(null);
 
   const [files, setFiles] = useState<File[]>([]);
   const [providerId, setProviderId] = useState<ProviderId>('baby-buddy');
@@ -77,6 +87,16 @@ export default function ExternalImport({
     useState(false);
   const [completedResult, setCompletedResult] =
     useState<ExternalImportCompletedResult | null>(null);
+  const [logSheetRows, setLogSheetRows] = useState<LogSheetCandidate[]>([]);
+  const [logSheetPages, setLogSheetPages] = useState<LogSheetSourcePage[]>([]);
+  const [logSheetBabyId, setLogSheetBabyId] = useState('');
+  const [recognitionProgress, setRecognitionProgress] = useState('');
+
+  useEffect(() => () => {
+    logSheetPages.forEach(page => {
+      if (page.imageUrl.startsWith('blob:')) URL.revokeObjectURL(page.imageUrl);
+    });
+  }, [logSheetPages]);
 
   useEffect(() => {
     if (isOpen) {
@@ -104,6 +124,11 @@ export default function ExternalImport({
     setIsLoadingBabies(false);
     setIsImporting(false);
     setCompletedResult(null);
+    setLogSheetRows([]);
+    setLogSheetPages([]);
+    setLogSheetBabyId('');
+    setRecognitionProgress('');
+    recognitionAbortRef.current = null;
   }, [isOpen]);
 
   const getAuthHeaders = (): HeadersInit => {
@@ -123,10 +148,12 @@ export default function ExternalImport({
 
     setFiles(selectedFiles);
     setPreview(null);
+    setLogSheetRows([]);
+    setLogSheetPages([]);
     setError('');
   };
 
-  const loadExistingBabies = async () => {
+  const loadExistingBabies = async (): Promise<ExistingBaby[]> => {
     setIsLoadingBabies(true);
 
     try {
@@ -143,11 +170,9 @@ export default function ExternalImport({
         );
       }
 
-      setBabies(
-        (result.data as ExistingBaby[]).filter(
-          baby => !baby.inactive,
-        ),
-      );
+      const available = (result.data as ExistingBaby[]).filter(baby => !baby.inactive);
+      setBabies(available);
+      return available;
     } finally {
       setIsLoadingBabies(false);
     }
@@ -207,7 +232,7 @@ export default function ExternalImport({
   });
 
   const handleImport = async () => {
-    if (!preview) {
+    if (providerId !== 'log-sheet-ocr' && !preview) {
       return;
     }
 
@@ -215,26 +240,46 @@ export default function ExternalImport({
       setIsImporting(true);
       setError('');
 
-      const formData = new FormData();
-      formData.set('providerId', providerId);
-
-      files.forEach(file => {
-        formData.append('files', file);
-      });
-
-      formData.set(
-        'configuration',
-        JSON.stringify(buildExecutionConfiguration()),
-      );
-
-      const response = await fetch(
-        '/api/import/external/execute',
-        {
+      let response: Response;
+      if (providerId === 'log-sheet-ocr') {
+        const selectedRows = logSheetRows.filter(row => row.selected);
+        if (!logSheetBabyId || !selectedRows.length || selectedRows.some(row => !row.reviewed)) {
+          throw new Error(t('Choose a baby, select rows, and mark each selected row as reviewed'));
+        }
+        response = await fetch('/api/import/log-sheet/execute', {
+          method: 'POST',
+          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            babyId: logSheetBabyId,
+            timezone: configuration.sourceTimezone,
+            rows: selectedRows.map(row => ({
+              selected: row.selected,
+              reviewed: row.reviewed,
+              documentHash: row.documentHash,
+              page: row.page,
+              line: row.line,
+              eventKind: row.eventKind,
+              date: row.date,
+              time: row.time,
+              feedKind: row.feedKind,
+              bottleType: row.bottleType,
+              amount: row.amount,
+              unit: row.unit,
+              diaperType: row.diaperType,
+            })),
+          }),
+        });
+      } else {
+        const formData = new FormData();
+        formData.set('providerId', providerId);
+        files.forEach(file => formData.append('files', file));
+        formData.set('configuration', JSON.stringify(buildExecutionConfiguration()));
+        response = await fetch('/api/import/external/execute', {
           method: 'POST',
           headers: getAuthHeaders(),
           body: formData,
-        },
-      );
+        });
+      }
 
       const result = await response.json();
 
@@ -262,13 +307,34 @@ export default function ExternalImport({
 
   const handlePreview = async () => {
     if (files.length === 0) {
-      setError(t('Select at least one CSV file'));
+      setError(t(providerId === 'log-sheet-ocr' ? 'Select at least one image or PDF' : 'Select at least one CSV file'));
       return;
     }
 
     try {
       setIsPreviewing(true);
       setError('');
+
+      if (providerId === 'log-sheet-ocr') {
+        const controller = new AbortController();
+        recognitionAbortRef.current = controller;
+        setRecognitionProgress(t('Loading local OCR engine'));
+        const availableBabies = await loadExistingBabies();
+        const result = await recognizeLogSheetFiles(files, {
+          signal: controller.signal,
+          onProgress: setRecognitionProgress,
+        });
+        setLogSheetRows([...result.candidates]);
+        setLogSheetPages([...result.pages]);
+        setLogSheetBabyId(availableBabies[0]?.id || '');
+        setConfiguration(current => ({
+          ...current,
+          sourceTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        }));
+        setPreview(null);
+        setStep('review');
+        return;
+      }
 
       const formData = new FormData();
       formData.set('providerId', providerId);
@@ -320,6 +386,14 @@ export default function ExternalImport({
       await loadExistingBabies();
       setStep('configure');
     } catch (previewError) {
+      if ((previewError instanceof DOMException && previewError.name === 'AbortError') ||
+        (providerId === 'log-sheet-ocr' && recognitionAbortRef.current?.signal.aborted)) {
+        setError('');
+        setLogSheetRows([]);
+        setLogSheetPages([]);
+        setStep('select');
+        return;
+      }
       setPreview(null);
       setError(
         previewError instanceof Error
@@ -327,6 +401,8 @@ export default function ExternalImport({
           : t('Failed to preview import files'),
       );
     } finally {
+      recognitionAbortRef.current = null;
+      setRecognitionProgress('');
       setIsPreviewing(false);
     }
   };
@@ -343,7 +419,7 @@ export default function ExternalImport({
       <FormPageContent>
         {step === 'select' && (
           <div className="space-y-6">
-          {isPreviewing && (
+          {isPreviewing && providerId !== 'log-sheet-ocr' && (
             <div
               role="status"
               aria-live="polite"
@@ -373,14 +449,17 @@ export default function ExternalImport({
 
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               {providerOptions.map(provider => (
-                <button
+                  <button
                   key={provider.id}
                   type="button"
                   aria-pressed={providerId === provider.id}
+                  disabled={isPreviewing}
                   onClick={() => {
                     setProviderId(provider.id);
                     setFiles([]);
                     setPreview(null);
+                    setLogSheetRows([]);
+                    setLogSheetPages([]);
                     setError('');
                     if (fileInputRef.current) fileInputRef.current.value = '';
                   }}
@@ -403,7 +482,8 @@ export default function ExternalImport({
             <input
               ref={fileInputRef}
               type="file"
-              accept=".csv,text/csv"
+              accept={providerId === 'log-sheet-ocr' ? 'application/pdf,image/jpeg,image/png,image/webp,image/bmp' : '.csv,text/csv'}
+              disabled={isPreviewing}
               multiple={
                 providerOptions.find(
                   provider => provider.id === providerId,
@@ -425,8 +505,12 @@ export default function ExternalImport({
                 className="mr-2 h-4 w-4"
                 aria-hidden="true"
               />
-              {t('Select CSV files')}
+              {providerId === 'log-sheet-ocr' ? t('Select photos or PDF') : t('Select CSV files')}
             </Button>
+
+            {providerId === 'log-sheet-ocr' && <p className="mt-3 text-sm text-slate-400">{t('Files stay in this browser and are processed with bundled local OCR. Handwriting recognition is experimental and requires row-by-row review.')}</p>}
+
+            {isPreviewing && providerId === 'log-sheet-ocr' && <div className="mt-3 rounded-md border border-teal-700 p-3 text-sm text-teal-100" role="status" aria-live="polite">{recognitionProgress || t('Processing locally...')} <Button type="button" variant="outline" size="sm" className="ml-3" onClick={() => recognitionAbortRef.current?.abort()}>{t('Cancel processing')}</Button></div>}
 
             {files.length > 0 && (
               <ul className="mt-4 space-y-1 text-sm text-slate-300">
@@ -489,13 +573,31 @@ export default function ExternalImport({
           />
         )}
 
-        {step === 'review' && preview && (
+        {step === 'review' && providerId === 'log-sheet-ocr' && (
+          <LogSheetReview
+            rows={logSheetRows}
+            pages={logSheetPages}
+            babies={babies}
+            babyId={logSheetBabyId}
+            timezone={configuration.sourceTimezone}
+            onRowsChange={setLogSheetRows}
+            onBabyChange={setLogSheetBabyId}
+            onTimezoneChange={timezone => {
+              setConfiguration(current => ({ ...current, sourceTimezone: timezone }));
+              setLogSheetRows(current => current.map(row => row.selected ? { ...row, reviewed: false } : row));
+            }}
+          />
+        )}
+
+        {step === 'review' && providerId !== 'log-sheet-ocr' && preview && (
           <ReviewStep
             preview={preview}
             babies={babies}
             configuration={configuration}
           />
         )}
+
+        {step === 'review' && error && <div role="alert" className="rounded-md border border-red-700 bg-red-950/40 p-3 text-sm text-red-200">{error}</div>}
 
         {step === 'result' && completedResult && (
           <div className="space-y-6">
@@ -528,10 +630,10 @@ export default function ExternalImport({
             <Button
               type="button"
               variant="outline"
-              onClick={onClose}
-              disabled={isPreviewing}
+              onClick={() => isPreviewing && providerId === 'log-sheet-ocr' ? recognitionAbortRef.current?.abort() : onClose()}
+              disabled={isPreviewing && providerId !== 'log-sheet-ocr'}
             >
-              {t('Cancel')}
+              {isPreviewing && providerId === 'log-sheet-ocr' ? t('Cancel processing') : t('Cancel')}
             </Button>
 
             <Button
@@ -594,7 +696,7 @@ export default function ExternalImport({
             <Button
               type="button"
               variant="outline"
-              onClick={() => setStep('configure')}
+              onClick={() => setStep(providerId === 'log-sheet-ocr' ? 'select' : 'configure')}
               disabled={isImporting}
             >
               {t('Back')}
@@ -603,7 +705,11 @@ export default function ExternalImport({
             <Button
               type="button"
               onClick={handleImport}
-              disabled={isImporting}
+              disabled={isImporting || (providerId === 'log-sheet-ocr' && (
+                !logSheetBabyId ||
+                logSheetRows.filter(row => row.selected).length === 0 ||
+                logSheetRows.some(row => row.selected && (!row.reviewed || !row.eventKind || !row.date || !row.time || (row.eventKind === 'feeding' && (!row.feedKind || (row.feedKind === 'BOTTLE' && (!row.amount || !row.unit)))) || (row.eventKind === 'diaper' && !row.diaperType)))
+              ))}
             >
               {isImporting
                 ? t('Importing...')
