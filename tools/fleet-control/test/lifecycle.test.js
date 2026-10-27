@@ -8,10 +8,10 @@ const os = require('node:os');
 const { spawn } = require('node:child_process');
 const { createSupervisor } = require('../run');
 
-function fixture() {
-  const children = [], scheduled = [], cancelled = [];
-  const supervisor = createSupervisor({ forkChild: (...args) => { const child = new EventEmitter(); child.args = args; child.kills = []; child.kill = signal => child.kills.push(signal); children.push(child); return child; }, schedule: fn => { scheduled.push(fn); return scheduled.length; }, cancel: id => cancelled.push(id), log: () => {} });
-  supervisor.start(); return { supervisor, children, scheduled, cancelled };
+function fixture(options = {}) {
+  const children = [], scheduled = [], cancelled = [], watches = [], cancelledWatches = [];
+  const supervisor = createSupervisor({ watchWrapper: false, forkChild: (...args) => { const child = new EventEmitter(); child.args = args; child.kills = []; child.kill = signal => child.kills.push(signal); children.push(child); return child; }, schedule: fn => { scheduled.push(fn); return scheduled.length; }, cancel: id => cancelled.push(id), scheduleWatch: fn => { watches.push(fn); return watches.length; }, cancelWatch: id => cancelledWatches.push(id), log: () => {}, ...options });
+  supervisor.start(); return { supervisor, children, scheduled, cancelled, watches, cancelledWatches };
 }
 test('supervisor stop during crash backoff cancels pending restart and fences late callbacks', () => {
   const f = fixture(); f.children[0].emit('exit', 1); assert.equal(f.scheduled.length, 1);
@@ -25,6 +25,37 @@ test('only a requested restart replaces the owned child immediately', () => {
 });
 test('unrequested restart exit code uses crash backoff and does not silently restart immediately', () => {
   const f = fixture(); f.children[0].emit('exit', 75); assert.equal(f.children.length, 1); assert.equal(f.scheduled.length, 1); f.supervisor.stop();
+});
+test('verified wrapper death stops only the owned child, clears the watch and fences late callbacks', () => {
+  let gone = false; const probes = [];
+  const f = fixture({ watchWrapper: true, wrapperPid: 4242, probeWrapper: pid => { probes.push(pid); if (gone) throw Object.assign(Error('parent exited'), { code: 'ESRCH' }); } });
+  assert.equal(f.children.length, 1); assert.equal(f.watches.length, 1);
+  gone = true; f.watches[0]();
+  assert.deepEqual(f.children[0].kills, ['SIGTERM']); assert.deepEqual(f.cancelledWatches, [1]); assert.deepEqual(probes, [4242, 4242]);
+  f.watches[0](); f.supervisor.stop(); f.children[0].emit('exit', 1);
+  assert.deepEqual(f.children[0].kills, ['SIGTERM']); assert.equal(f.scheduled.length, 0); assert.equal(probes.length, 2);
+});
+test('wrapper death during crash backoff cancels restart without creating another child', () => {
+  let gone = false;
+  const f = fixture({ watchWrapper: true, wrapperPid: 4242, probeWrapper: () => { if (gone) throw Object.assign(Error('gone'), { code: 'ESRCH' }); } });
+  f.children[0].emit('exit', 1); gone = true; f.watches[0]();
+  assert.deepEqual(f.cancelled, [1]); assert.deepEqual(f.cancelledWatches, [1]);
+  f.scheduled[0](); assert.equal(f.children.length, 1);
+});
+test('permission or unknown wrapper-probe errors do not establish death or terminate a child', () => {
+  let code = 'EPERM';
+  const f = fixture({ watchWrapper: true, wrapperPid: 4242, probeWrapper: () => { throw Object.assign(Error('unverified'), { code }); } });
+  f.watches[0](); code = 'EACCES'; f.watches[0](); code = undefined; f.watches[0]();
+  assert.equal(f.children.length, 1); assert.deepEqual(f.children[0].kills, []); assert.deepEqual(f.cancelledWatches, []);
+  f.supervisor.stop(); assert.deepEqual(f.children[0].kills, ['SIGTERM']); assert.deepEqual(f.cancelledWatches, [1]);
+});
+test('a wrapper already confirmed dead prevents the initial child launch', () => {
+  const f = fixture({ watchWrapper: true, wrapperPid: 4242, probeWrapper: () => { throw Object.assign(Error('gone'), { code: 'ESRCH' }); } });
+  assert.equal(f.children.length, 0); assert.deepEqual(f.cancelledWatches, [1]);
+});
+test('manual launches do not activate a wrapper watcher', () => {
+  const f = fixture({ watchWrapper: false, probeWrapper: () => { throw Error('must not probe'); } });
+  assert.equal(f.watches.length, 0); assert.equal(f.children.length, 1); f.supervisor.stop();
 });
 test('two stale-lock recovery contenders cannot both own the same state', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'babytracker-lock-race-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

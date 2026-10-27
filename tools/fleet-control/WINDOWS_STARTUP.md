@@ -82,3 +82,33 @@ The wrapper clears only inherited `BABYTRACKER_*` configuration keys in its own
 process environment before Node reads `fleet.env`. This prevents an unrelated
 inherited flag from overriding the explicit saved configuration. It changes no
 user-wide or machine-wide environment settings.
+
+## Scheduled-task stop and wrapper lifetime
+
+The first target-machine check found that `Stop-ScheduledTask` terminated the
+WScript action but left its Node supervisor/controller running. A subsequent
+start then correctly failed the existing-controller lock instead of applying
+new environment settings. Task state alone was therefore insufficient shutdown
+evidence.
+
+The updated launcher sets `BABYTRACKER_FLEET_WRAPPER_WATCH=1` only in its child
+process environment. On Windows, the supervisor captures its original parent
+PID and checks existence every two seconds using a signal-0 read probe. A verified
+`ESRCH` result cancels its watcher/restart timer and stops only its own controller
+ChildProcess. Permission or unknown probe errors do not establish parent death
+and never trigger a process sweep. Manual Node launches do not enable this guard
+by default.
+
+This guard has local lifecycle tests; **the updated Windows Stop/start sequence
+still requires target-host verification**. After stopping the task, verify the
+owned Node processes have exited and the listener disappeared before starting
+again. Do not terminate unrelated Node/Codex processes. PID existence checks
+cannot identify a PID reused by another process; unresolved ownership must be
+investigated explicitly.
+
+The installer deliberately refuses to overwrite an existing differing launcher.
+When updating an already-installed older wrapper, stop and verify the owned
+controller, preserve the old wrapper for recovery, then explicitly replace only
+that verified BabyTracker launcher with the reviewed version. Preserve `fleet.env`
+and all controller/task state. Do not claim reboot or sign-in recovery from this
+stop/start test.
