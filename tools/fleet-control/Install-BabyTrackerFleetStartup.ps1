@@ -14,6 +14,18 @@ $taskName = 'BabyTracker - Fleet Control'
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if ($identity.IsSystem) { throw 'Run this installer as the intended signed-in user, not SYSTEM.' }
 $sid = $identity.User.Value
+function Test-CurrentUserIdentity([string]$UserId) {
+    try {
+        # Task Scheduler may normalize the registered SID to a local short name.
+        # Resolve the actual identity instead of weakening the owner check.
+        $resolved = if ($UserId -match '^S-\d-') {
+            [Security.Principal.SecurityIdentifier]::new($UserId)
+        } else {
+            ([Security.Principal.NTAccount]::new($UserId)).Translate([Security.Principal.SecurityIdentifier])
+        }
+        return $resolved.Value -eq $sid
+    } catch { return $false }
+}
 $codeDirectory = [IO.Path]::GetFullPath($PSScriptRoot)
 $statePath = [IO.Path]::GetFullPath($StateDirectory).TrimEnd('\')
 $sourcePath = [IO.Path]::GetFullPath($SourceDirectory).TrimEnd('\')
@@ -49,10 +61,10 @@ if ($existing) {
     $actions = @($existing.Actions)
     $triggers = @($existing.Triggers)
     if ($existing.Description -ne $description -or
-        $existing.Principal.UserId -notin @($sid, $identity.Name) -or
+        -not (Test-CurrentUserIdentity $existing.Principal.UserId) -or
         [string]$existing.Principal.RunLevel -ne 'Limited' -or [string]$existing.Principal.LogonType -ne 'Interactive' -or
         $actions.Count -ne 1 -or $actions[0].Execute -ine $wscriptPath -or $actions[0].Arguments -ne $actionArguments -or
-        $triggers.Count -ne 1 -or $triggers[0].CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger' -or $triggers[0].UserId -notin @($sid, $identity.Name) -or
+        $triggers.Count -ne 1 -or $triggers[0].CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger' -or -not (Test-CurrentUserIdentity $triggers[0].UserId) -or
         [string]$existing.Settings.MultipleInstances -ne 'IgnoreNew' -or $existing.Settings.ExecutionTimeLimit -ne 'PT0S') {
         throw 'A different same-name task exists. It was preserved; inspect it before choosing a migration.'
     }
