@@ -13,7 +13,7 @@ ARG DATABASE_PROVIDER=sqlite
 # - postgresql-client: pg_isready for PostgreSQL healthchecks
 # - python3 make g++: build tools for better-sqlite3 native module
 RUN apk add --no-cache tzdata openssl dcron curl postgresql-client \
-    tesseract-ocr tesseract-ocr-data-eng poppler-utils util-linux \
+    tesseract-ocr tesseract-ocr-data-eng poppler-utils util-linux font-dejavu \
     python3 make g++
 
 # Set working directory

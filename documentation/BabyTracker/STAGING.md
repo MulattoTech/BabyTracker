@@ -4,11 +4,12 @@ Use `compose.ocr-staging.yml` with synthetic records. It has a distinct project,
 container and three persistence volumes, a loopback-only port, and a two-CPU,
 3 GiB, 256-PID runtime budget. It never mounts production storage.
 
-The isolated internal network defaults to `10.254.73.0/28`; check existing Docker
+The separate staging network defaults to `10.254.73.0/28`; check existing Docker
 networks and host routes first, or set `BABYTRACKER_STAGING_SUBNET` to another
 verified unused private range. This avoids consuming an exhausted automatic
-address pool. It does not remove or reconfigure existing networks, and runtime
-recognition needs no internet connection.
+address pool. It does not remove or reconfigure existing networks. Docker Desktop
+requires a regular bridge for the loopback port publication; this network is not
+an outbound firewall. The OCR adapter itself makes no external recognition call.
 
 ```sh
 docker compose -f compose.ocr-staging.yml build
@@ -20,6 +21,21 @@ Open `http://127.0.0.1:3124` on the Docker host. Complete normal Sprout setup wi
 clearly named synthetic family and synthetic child. Authentication remains
 required for OCR. No public tunnel or access-policy change is part of this file.
 Do not enter real infant data into this acceptance environment.
+
+For a new empty acceptance environment, the guarded HTTP check creates a fixed
+synthetic family and child, then exercises native image recognition, draft save,
+approval, exact retry, original-source access and the existing timeline:
+
+```sh
+docker compose -f compose.ocr-staging.yml exec -T app node scripts/ocr-staging-check.mjs
+```
+
+The check refuses to run without both explicit staging/OCR flags or if any other
+child exists. Its first run creates two synthetic care events; later runs verify
+the same receipt without adding events. A random, UI-compatible caretaker PIN is
+stored only in `/app/env/ocr-staging-access.json` with mode 0600; it is never
+printed in logs or committed. The synthetic family slug is `ocr-staging`, login
+ID `01`. This check is for a disposable staging deployment, never production.
 
 ## Browser verification
 

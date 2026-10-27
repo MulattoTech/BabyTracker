@@ -22,6 +22,7 @@ services:
       ENABLE_NOTIFICATIONS: 'false'
       ENABLE_LOG: 'false'
       BABYTRACKER_OCR_ENABLED: 'true'
+      BABYTRACKER_SYNTHETIC_STAGING: 'true'
       TZ: UTC
     volumes:
       - staging-db:/db
@@ -39,7 +40,6 @@ volumes:
   staging-files:
 networks:
   default:
-    internal: true
     ipam:
       config:
         - subnet: '${BABYTRACKER_STAGING_SUBNET:-10.254.73.0/28}'

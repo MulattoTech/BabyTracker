@@ -10,6 +10,7 @@ tests/
 
 # Never copy runtime infant files or local databases into an application image
 Files/
+env/
 *.db
 *.db-shm
 *.db-wal
