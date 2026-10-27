@@ -1,9 +1,35 @@
 # Windows startup handoff
 
-The startup helper is prepared for Windows PowerShell 5.1 / PowerShell 7 with
-Node.js 22+. It has **not been executed or parsed on Windows in the authoring
-environment**. Verify it on the target machine before claiming installation,
-sign-in recovery or hidden-window behavior passed.
+The startup helper supports Windows PowerShell 5.1 / PowerShell 7 with Node.js
+22+. On 2026-10-27, target-host parsing, registration, hidden task startup,
+controller controls and the stop/start recovery sequence passed. Actual reboot
+and sign-out/sign-in recovery remain untested. Local JavaScript tests alone are
+not the evidence for the Windows results below.
+
+## Verified target-host results — 2026-10-27
+
+- Current-user Limited/Interactive task registered with an at-logon trigger and
+  IgnoreNew; its running listener binds only to `127.0.0.1:4319`.
+- Existing task ownership is resolved to the current SID. Windows normalized
+  the principal to a short account name; exact SID resolution verified identity
+  without relaxing the owner check.
+- With the wrapper guard installed, `Stop-ScheduledTask` removed its owned Node
+  supervisor, controller and listener. Starting again restored paused state and
+  the existing unassigned OCR issue proposal. A repeated start was ignored and
+  did not replace the listener process.
+- Start refused absent project workers after the verified project/quota checks.
+  Emergency Stop remained latched through Pause and Graceful Stop; explicit
+  release required verified zero project sessions. Controller restart changed
+  its instance token, preserved the proposal and remained paused.
+- There were zero BabyTracker worker sessions and zero provider dispatches.
+  The other projects' session-ID set was unchanged during the installed control
+  check. Shared-account quota was read, never modified.
+
+The tested runtime/installer revision was `3490b1d59c46544c2d83acc1555b428017949892`.
+Its [hosted fleet tests] and [deployment validation] passed. The suite contains
+41 tests, with an independent rerun of the nine lifecycle tests. These checks do
+not establish dynamic worker provisioning, live-worker kill acceptance, actual
+model replacement or reboot recovery.
 
 ## Review, register, then test
 
@@ -99,10 +125,10 @@ ChildProcess. Permission or unknown probe errors do not establish parent death
 and never trigger a process sweep. Manual Node launches do not enable this guard
 by default.
 
-This guard has local lifecycle tests; **the updated Windows Stop/start sequence
-still requires target-host verification**. After stopping the task, verify the
-owned Node processes have exited and the listener disappeared before starting
-again. Do not terminate unrelated Node/Codex processes. PID existence checks
+This guard passed local lifecycle tests and the target-host stop/start sequence
+recorded above. After stopping the task, verify the owned Node processes have
+exited and the listener disappeared before starting again. Do not terminate
+unrelated Node/Codex processes. PID existence checks
 cannot identify a PID reused by another process; unresolved ownership must be
 investigated explicitly.
 
@@ -112,3 +138,6 @@ controller, preserve the old wrapper for recovery, then explicitly replace only
 that verified BabyTracker launcher with the reviewed version. Preserve `fleet.env`
 and all controller/task state. Do not claim reboot or sign-in recovery from this
 stop/start test.
+
+[hosted fleet tests]: https://github.com/MulattoTech/BabyTracker/actions/runs/40457750019
+[deployment validation]: https://github.com/MulattoTech/BabyTracker/actions/runs/40457750006
