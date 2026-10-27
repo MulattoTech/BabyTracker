@@ -17,7 +17,7 @@ function validateAgentInput(input, catalog) {
   if (typeof input.name !== 'string' || !NAME.test(input.name) || input.name.trim() !== input.name) throw Error('Agent display name must be 3-80 simple characters');
   const kind = input.kind || 'worker';
   if (!['worker', 'orchestrator'].includes(kind)) throw Error('Agent role must be worker or orchestrator');
-  const selection = validateSelection({ harness: input.harness, model: input.model, effort: input.effort, mode: 'chat' }, catalog);
+  const selection = validateSelection({ harness: input.harness, model: input.model, effort: input.effort, mode: input.harness === 'agy' ? 'tui' : 'chat' }, catalog);
   if (!['codex','agy'].includes(selection.harness)) throw Error('Only verified Codex and AGY are supported');
   return { ...selection, name: input.name, kind };
 }
@@ -29,6 +29,7 @@ async function provisionAgent(config, {
   if (!config.aoPath || !fs.statSync(config.aoPath, { throwIfNoEntry: false })?.isFile()) throw Error('Configured AO binary unavailable');
   if (!config.repoPath || !fs.statSync(config.repoPath, { throwIfNoEntry: false })?.isDirectory()) throw Error('BabyTracker source unavailable');
   if (!selection || !['codex','agy'].includes(selection.harness) ||
+      selection.mode !== (selection.harness === 'agy' ? 'tui' : 'chat') ||
       !NAME.test(selection.name) || !['worker','orchestrator'].includes(selection.kind)) throw Error('Unvalidated agent selection');
   const run = (args, timeout = 15000) => runner(config.aoPath, args, {
     cwd: config.repoPath, windowsHide: true, maxBuffer: 100000, timeout
@@ -48,11 +49,19 @@ async function provisionAgent(config, {
   if (before.some(s => active(s) && s.projectId === PROJECT && s.displayName === selection.name)) throw Error('An active BabyTracker agent already uses this name');
   const originalIds = new Set(before.map(s => s.id));
   const argv = ['spawn','--project',PROJECT,'--kind',selection.kind,
-    '--harness',selection.harness,'--mode','chat','--name',selection.name,'--model',selection.model];
+    '--harness',selection.harness,'--mode',selection.mode,'--name',selection.name,'--model',selection.model];
   if (selection.effortMode === 'flag' && selection.launchEffort) argv.push('--effort',selection.launchEffort);
   onSubmit({ existingIds: [...originalIds].filter(s => /^[a-z0-9][a-z0-9-]{2,89}$/.test(s)), name: selection.name,
     harness: selection.harness, kind: selection.kind });
-  await run(argv, 30000);
+  try { await run(argv, 30000); }
+  catch (error) {
+    // Native AO diagnostic, not the full command line or environmental secrets.
+    const detail = String(error?.stderr || '').replace(/\x1B\[[0-9;]*m/g, '')
+      .replace(/[\r\n\t]+/g, ' ').replace(/[\x00-\x1f]+/g, '')
+      .slice(0, 350);
+    throw Error('AO rejected ' + selection.harness + ' spawn' +
+      (detail ? ': ' + detail : ' (no diagnostic stderr returned)'));
+  }
   for (let i = 0; i < 16; i++) {
     const after = await sessions();
     if (!Array.isArray(after)) throw Error('Live AO session verification unavailable');

@@ -83,7 +83,7 @@ function createServer({ config, controller, onRestart = null, projectsReader = a
         case 'nudge': result = await controller.dispatch(input.id, 'nudge', { manualAgy: input.acknowledgeUnknownAgyQuota === true }); break;
         case 'find-work': result = await controller.dispatch(input.id, 'find-work', { manualAgy: input.acknowledgeUnknownAgyQuota === true }); break;
         case 'add-agent': result = await controller.addAgent(input.agent); break;
-        case 'reconcile-agent': result = await controller.reconcileAgentSpawn(); break;
+        case 'reconcile-agent': result = await controller.reconcileAgentSpawn({ confirmNoSession: input.confirmNoSession === true }); break;
         case 'all-hands': result = await controller.allHands(); break;
         case 'turbo': result = controller.turbo(input.enabled); break;
         case 'limits': result = controller.limits(input.limits); break;

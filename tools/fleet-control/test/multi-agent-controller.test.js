@@ -80,7 +80,7 @@ test('uncertain provision persists and reconciliation identifies exact native pr
  await assert.rejects(f.controller.addAgent(agy),/reconcile before retrying/);
  assert.equal(f.controller.state.provisioning.status,'uncertain');
  await assert.rejects(f.controller.addAgent(agy),/needs reconciliation/);
- await assert.rejects(f.controller.reconcileAgentSpawn(),/could not be verified/);
+ await assert.rejects(f.controller.reconcileAgentSpawn(),/not verified/);
  f.state.sessions.push({...agent('baby-manual-found','agy'),displayName:agy.name,kind:'worker'});
  const result=await f.controller.reconcileAgentSpawn();
  assert.equal(result.sessionId,'baby-manual-found');
@@ -116,4 +116,29 @@ test('Mixed fleets suspend Codex Turbo at quota brake without authorizing automa
  assert.equal(f.controller.state.mode,'running');
  assert.equal(f.controller.state.run.turbo,false);
  assert.equal(f.state.commands.length,0);
+});
+
+test('failed AGY TUI creation can be explicitly reconciled only after two session reads and 30 seconds',async t=>{
+ const f=fixture(t,{failProvision:true});
+ await assert.rejects(f.controller.addAgent(agy),/reconcile before retrying/);
+ assert.equal(f.controller.state.provisioning.status,'uncertain');
+ await assert.rejects(f.controller.reconcileAgentSpawn({confirmNoSession:true}),/30 seconds/);
+ f.controller.state.provisioning.at=new Date(Date.now()-65000).toISOString();
+ f.controller.save();
+ const result=await f.controller.reconcileAgentSpawn({confirmNoSession:true});
+ assert.match(result.note,/No BabyTracker agent was created/);
+ assert.equal(f.controller.state.provisioning.status,'rejected');
+ f.state.failProvision=false;
+ const success=await f.controller.addAgent(agy);
+ assert.equal(success.ok,true);
+ assert.equal(f.state.provisions.length,2);
+});
+test('cannot clear uncertain spawn when any new BabyTracker session exists, even a terminated or unrelated one',async t=>{
+ const f=fixture(t,{failProvision:true});
+ await assert.rejects(f.controller.addAgent(agy),/unverified/);
+ f.controller.state.provisioning.at=new Date(Date.now()-65000).toISOString();
+ f.controller.save();
+ f.state.sessions.push({...agent('babytrack-foreign','codex'),isTerminated:true,displayName:'Different project worker'});
+ await assert.rejects(f.controller.reconcileAgentSpawn({confirmNoSession:true}),/session was not verified/);
+ assert.equal(f.controller.state.provisioning.status,'uncertain');
 });

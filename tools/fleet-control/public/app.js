@@ -110,5 +110,5 @@ $('createAgent').addEventListener('click', async () => {
   try { await action('add-agent', { agent }); $('addAgentDialog').close(); }
   catch {} finally { $('createAgent').disabled = false; }
 });
-$('reconcileAgent').addEventListener('click', () => action('reconcile-agent').catch(() => {}));
+$('reconcileAgent').addEventListener('click', () => { if (confirm('Check AO twice for the previous agent. If no BabyTracker session exists and at least 30 seconds passed, record the rejected attempt and allow a new spawn? This does not launch an agent.')) action('reconcile-agent', { confirmNoSession: true }).catch(() => {}); });
 refresh(); setInterval(refresh, 8000);

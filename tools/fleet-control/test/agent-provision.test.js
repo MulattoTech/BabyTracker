@@ -37,14 +37,16 @@ test('AGY Gemini model selection encodes effort in model ID; CLI receives no uns
   const selection=validateAgentInput({name:'BabyTracker Gemini 1',kind:'worker',harness:'agy',model:'gemini-3.8-flash-high',effort:'high'},CATALOG);
   const result=await provisionAgent(f.config,{...f.deps,selection});
   assert.equal(result.harness,'agy');
+  assert.equal(selection.mode,'tui');
   assert.equal(result.created,true);
-  assert.deepEqual(f.state.spawned[0],['spawn','--project','babytracker','--kind','worker','--harness','agy','--mode','chat','--name','BabyTracker Gemini 1','--model','gemini-3.8-flash-high']);
+  assert.deepEqual(f.state.spawned[0],['spawn','--project','babytracker','--kind','worker','--harness','agy','--mode','tui','--name','BabyTracker Gemini 1','--model','gemini-3.8-flash-high']);
   assert.equal(f.state.sessions[0].projectId,'mjobs-luna');
 });
 test('Codex reasoning passes explicit effort flag for brand-new agent',async t=>{
   const f=fixture(t);
   const selection=validateAgentInput({name:'BabyTracker Reviewer',kind:'worker',harness:'codex',model:'gpt-6-luna',effort:'high'},CATALOG);
   await provisionAgent(f.config,{...f.deps,selection});
+  assert.equal(selection.mode,'chat');
   assert.deepEqual(f.state.spawned[0].slice(-2),['--effort','high']);
 });
 test('unknown providers, models, and unsafe names are refused at selection',()=>{
@@ -70,7 +72,7 @@ test('duplicate live names cannot be spawned and uncertain submission is never a
   await assert.rejects(provisionAgent(f.config,{...f.deps,selection}),/already uses/);
   assert.equal(f.state.spawned.length,1);
   const g=fixture(t);g.state.fail=true;
-  await assert.rejects(provisionAgent(g.config,{...g.deps,selection}),/network timeout/);
+  await assert.rejects(provisionAgent(g.config,{...g.deps,selection}),/AO rejected agy spawn/);
   assert.equal(g.state.submits,1);
   assert.equal(g.state.spawned.length,1);
 });

@@ -25,7 +25,7 @@ Add Agent is an explicitly confirmed `POST /api/action` with
 name. The controller checks native AO's live repository/path/project binding,
 provider authorization, active project membership, RAM, max-agent cap, emergency
 state and quota for Codex. It uses AO's native `spawn --project babytracker`
-with chat mode in an AO-isolated git worktree; it never launches a shell or
+with structured Chat mode for Codex or native Terminal UI mode for AGY in an AO-isolated git worktree; it never launches a shell or
 starts a task as part of agent creation. Every new session ID is verified before
 reporting success.
 
