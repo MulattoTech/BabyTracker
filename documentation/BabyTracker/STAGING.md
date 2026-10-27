@@ -4,6 +4,12 @@ Use `compose.ocr-staging.yml` with synthetic records. It has a distinct project,
 container and three persistence volumes, a loopback-only port, and a two-CPU,
 3 GiB, 256-PID runtime budget. It never mounts production storage.
 
+The isolated internal network defaults to `10.254.73.0/28`; check existing Docker
+networks and host routes first, or set `BABYTRACKER_STAGING_SUBNET` to another
+verified unused private range. This avoids consuming an exhausted automatic
+address pool. It does not remove or reconfigure existing networks, and runtime
+recognition needs no internet connection.
+
 ```sh
 docker compose -f compose.ocr-staging.yml build
 docker compose -f compose.ocr-staging.yml up -d

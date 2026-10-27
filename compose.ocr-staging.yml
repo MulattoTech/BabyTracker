@@ -37,3 +37,9 @@ volumes:
   staging-db:
   staging-env:
   staging-files:
+networks:
+  default:
+    internal: true
+    ipam:
+      config:
+        - subnet: '${BABYTRACKER_STAGING_SUBNET:-10.254.73.0/28}'
