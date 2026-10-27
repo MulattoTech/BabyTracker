@@ -64,3 +64,35 @@ test('HTTP controls enforce host, same-origin, token and JSON; GETs do not mutat
   assert.match(await page.text(), /BabyTracker/);
   assert.equal((await fetch(base + '/controller.json')).status, 404);
 });
+
+test('unified portal GET is read-only and Add Agent action preserves local token/origin protections', async t => {
+  const calls = [];
+  const controller = {
+    state: {mode:'paused'}, snapshot: async () => ({mode:'paused',sessions:[]}),
+    providers: async () => ({providers:[{id:'agy',available:true,models:[]}]}),
+    addAgent: async a => {calls.push(['add',a]);return {ok:true,note:'created'};},
+    reconcileAgentSpawn: async()=>{calls.push(['reconcile']);return {ok:true};},
+    dispatch: async(id,kind,opts)=>{calls.push(['dispatch',id,kind,opts]);return {ok:true};}
+  };
+  const server=createServer({config:{projectId:'babytracker'},controller,projectsReader:async()=>({aoOnline:true,projects:[]})});
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  t.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
+  const url='http://127.0.0.1:'+server.address().port;
+  for(const route of ['/projects','/projects.js','/api/projects','/api/providers']){
+    const r=await fetch(url+route);assert.equal(r.status,200);
+  }
+  assert.equal(calls.length,0);
+  const token=(await (await fetch(url+'/api/session')).json()).token;
+  const send=(origin,tokenValue,payload)=>fetch(url+'/api/action',{method:'POST',headers:{
+    'Origin':origin,'Content-Type':'application/json','X-BabyTracker-Fleet':tokenValue
+  },body:JSON.stringify(payload)});
+  const newAgent={name:'BabyTracker Gemini Agent',kind:'worker',harness:'agy',model:'gemini-3.8-flash-low',effort:'low',acknowledgeUnknownAgyQuota:true};
+  assert.equal((await send('https://external.example',token,{action:'add-agent',agent:newAgent})).status,403);
+  assert.equal((await send(url,'bad',{action:'add-agent',agent:newAgent})).status,403);
+  assert.equal(calls.length,0);
+  assert.equal((await send(url,token,{action:'add-agent',agent:newAgent})).status,200);
+  assert.equal((await send(url,token,{action:'find-work',id:'babytracker-4',acknowledgeUnknownAgyQuota:true})).status,200);
+  assert.equal((await send(url,token,{action:'reconcile-agent'})).status,200);
+  assert.deepEqual(calls.map(x=>x[0]),['add','dispatch','reconcile']);
+  assert.deepEqual(calls[1][3],{manualAgy:true});
+});
