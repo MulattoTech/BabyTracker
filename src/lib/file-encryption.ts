@@ -16,7 +16,11 @@ function getEncryptionKey(): Buffer {
 }
 
 function resolveDir(subdir?: string): string {
-  const dir = subdir ? path.join(FILES_DIR, subdir) : FILES_DIR;
+  // OCR acceptance tests isolate sources as well as the database. Other Sprout
+  // attachments keep their existing storage behavior; request data cannot set this.
+  const dir = subdir === 'ocr' && process.env.BABYTRACKER_OCR_FILES_DIR
+    ? path.resolve(process.env.BABYTRACKER_OCR_FILES_DIR)
+    : subdir ? path.join(FILES_DIR, subdir) : FILES_DIR;
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }

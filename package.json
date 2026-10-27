@@ -21,7 +21,8 @@
     "notification:cron:run": "bash scripts/run-notification-cron.sh",
     "env:ensure": "node scripts/ensure-env-defaults.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:ocr-browser": "node scripts/ocr-browser-smoke.mjs"
   },
   "dependencies": {
     "@lucide/lab": "^0.2.0",
@@ -85,6 +86,7 @@
     "autoprefixer": "^10.5.4",
     "eslint": "^10.9.1",
     "eslint-config-next": "^16.3.3",
+    "playwright": "1.58.2",
     "postcss": "^8.5.26",
     "postcss-import": "^17.0.0",
     "tailwindcss": "^4.3.3",

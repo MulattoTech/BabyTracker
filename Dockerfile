@@ -13,10 +13,19 @@ ARG DATABASE_PROVIDER=sqlite
 # - postgresql-client: pg_isready for PostgreSQL healthchecks
 # - python3 make g++: build tools for better-sqlite3 native module
 RUN apk add --no-cache tzdata openssl dcron curl postgresql-client \
+    tesseract-ocr tesseract-ocr-data-eng poppler-utils util-linux font-dejavu \
     python3 make g++
 
 # Set working directory
 WORKDIR /app
+
+# BabyTracker: pin the local English model; source documents never leave this image.
+RUN mkdir -p /app/ocr-model && \
+    curl --fail --location --max-time 60 \
+      https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/87416418657359cb625c412a48b6e1d6d41c29bd/eng.traineddata \
+      --output /app/ocr-model/eng.traineddata && \
+    echo "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2  /app/ocr-model/eng.traineddata" | sha256sum -c -
+ENV TESSDATA_PREFIX=/app/ocr-model
 
 # Copy package files
 COPY package.json package-lock.json ./
