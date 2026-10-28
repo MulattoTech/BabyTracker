@@ -339,6 +339,20 @@ function attachmentDisposition(filename: string): string {
   return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodedFilename}`;
 }
 
+function startsWithSpreadsheetFormula(value: string): boolean {
+  let index = 0;
+  while (index < value.length) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0xfeff) {
+      index += 1;
+      continue;
+    }
+    const first = value[index];
+    return first === '=' || first === '+' || first === '-' || first === '@';
+  }
+  return false;
+}
+
 async function handleGet(req: NextRequest, authContext: AuthResult) {
   try {
     const { familyId: userFamilyId } = authContext;
@@ -589,11 +603,10 @@ async function handleGet(req: NextRequest, authContext: AuthResult) {
     // CSV quoting does not stop spreadsheet formula execution. Keep imported
     // and user-authored text inert when it begins with a formula marker,
     // including after leading whitespace or control characters.
-    const formulaPrefix = /^[\u0000-\u0020\u007f-\u009f]*[=+\-@]/;
     const safeRows = rows.map(row => Object.fromEntries(
       Object.entries(row).map(([key, value]) => [
         key,
-        typeof value === 'string' && formulaPrefix.test(value) ? `'${value}` : value,
+        typeof value === 'string' && startsWithSpreadsheetFormula(value) ? `'${value}` : value,
       ])
     ));
     const csvContent = objectArrayToCsv(safeRows);

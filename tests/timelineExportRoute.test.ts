@@ -98,12 +98,21 @@ describe('timeline export route', () => {
         time: new Date('2026-08-31T09:00:00.000Z'),
         content: '=HYPERLINK("https://example.invalid","open")',
       },
+      {
+        id: 'note-2',
+        babyId: 'baby-1',
+        familyId: 'family-1',
+        time: new Date('2026-08-31T08:00:00.000Z'),
+        content: '\t@SUM(1,1)',
+      },
     ]);
 
     const response = await GET(exportRequest('csv') as any);
 
     expect(response.status).toBe(200);
-    expect(await response.text()).toContain("'=HYPERLINK(\"\"https://example.invalid\"\",\"\"open\"\")");
+    const csv = await response.text();
+    expect(csv).toContain("'=HYPERLINK(\"\"https://example.invalid\"\",\"\"open\"\")");
+    expect(csv).toContain("'\t@SUM(1,1)");
   });
 
   it.each([
