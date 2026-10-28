@@ -1,0 +1,254 @@
+import {
+  OCR_MAX_CANDIDATES, OCR_MAX_NOTES, OCR_MAX_SOURCE_LINE, OCR_PARSER_VERSION,
+  OcrCandidate, OcrEditableField, OcrEventType, OcrFieldOrigin, OcrPageText, OcrParseOptions,
+} from './types';
+import { isOcrDate } from './validation';
+
+interface Clock { readonly value: string | null; readonly raw: string; readonly index: number; }
+interface DateMatch { readonly value: string | null; readonly raw: string; }
+
+const feedPattern = /\b(?:feed(?:ing)?|fed|bottle|btl|formula|breast\s*milk|breastfed|breastfeed(?:ing)?|nurs(?:e|ed|ing))\b/i;
+const diaperPattern = /\b(?:diaper|nappy|wet|dirty|dry|stool|poop(?:ed)?|urine|pee(?:d)?|bowel\s+movement)\b/i;
+const sleepPattern = /\b(?:sleep|slept|asleep|nap(?:ped)?|bedtime|awake|woke)\b/i;
+const volumePattern = /(?<![\w.,/+-])([+-]?(?:\d+\s+\d+\s*\/\s*\d+|\d+\s*[¼½¾]|\d+\s*\/\s*\d+|\d+(?:[.,]\d+)?|[¼½¾]))\s*(m[lL](?:s)?|millilit(?:er|re)s?|(?:fl\.?\s*)?oz|ounces?)\b/gi;
+
+function datesIn(text: string): DateMatch[] {
+  const dates: DateMatch[] = [];
+  const volumeSpans = [...text.matchAll(volumePattern)].map(match => [match.index ?? 0, (match.index ?? 0) + match[0].length]);
+  const pattern = /\b(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/.-]\d{1,2}(?:[/.-]\d{2,4})?)\b/g;
+  for (const match of text.matchAll(pattern)) {
+    if (volumeSpans.some(([start, end]) => (match.index ?? 0) >= start && (match.index ?? 0) < end)) continue;
+    const raw = match[0];
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) dates.push({ value: isOcrDate(raw) ? raw : null, raw });
+    // Numeric slashes can mean either day/month or month/day. Never guess or supply the year.
+    else if (raw.includes('/') || raw.includes('-')) dates.push({ value: null, raw });
+  }
+  return dates;
+}
+
+function clocksIn(text: string, mode: OcrParseOptions['timeFormat']): Clock[] {
+  const clocks: Clock[] = [];
+  const pattern = /\b(?:(\d{1,2}):(\d{2})\s*([ap]\.?m\.?)?|(\d{1,2})\s*([ap]\.?m\.?)|noon|midnight)(?![\w:])/gi;
+  for (const match of text.matchAll(pattern)) {
+    const raw = match[0].trim();
+    let value: string | null = null;
+    if (/^noon$/i.test(raw)) value = '12:00';
+    else if (/^midnight$/i.test(raw)) value = '00:00';
+    else {
+      const hour = Number(match[1] ?? match[4]);
+      const minute = Number(match[2] ?? 0);
+      const meridiem = match[3] ?? match[5];
+      if (minute < 60 && meridiem && hour >= 1 && hour <= 12) {
+        const normalizedHour = hour % 12 + (/^p/i.test(meridiem) ? 12 : 0);
+        value = `${String(normalizedHour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+      } else if (minute < 60 && !meridiem && hour <= 23 && mode !== '12h' && (hour === 0 || hour > 12 || mode === '24h')) {
+        value = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+      }
+    }
+    if (/^\s*\?/.test(text.slice((match.index ?? 0) + match[0].length))) value = null;
+    clocks.push({ raw, value, index: match.index ?? 0 });
+  }
+  return clocks;
+}
+
+function parseAmount(raw: string): number | null {
+  if (raw.includes(',')) return null;
+  const normalized = raw.replace(/([¼½¾])/g, char => ` ${ { '¼': '1/4', '½': '1/2', '¾': '3/4' }[char] }`).trim();
+  const mixed = normalized.match(/^([+-]?\d+)\s+(\d+)\s*\/\s*(\d+)$/);
+  const fraction = normalized.match(/^([+-]?\d+)\s*\/\s*(\d+)$/);
+  let amount: number;
+  if (mixed) amount = Number(mixed[1]) + (Number(mixed[1]) < 0 ? -1 : 1) * Number(mixed[2]) / Number(mixed[3]);
+  else if (fraction) amount = Number(fraction[1]) / Number(fraction[2]);
+  else amount = Number(normalized);
+  return Number.isFinite(amount) ? amount : null;
+}
+
+function volumesIn(text: string): { amount: number | null; unit: 'ML' | 'OZ'; raw: string }[] {
+  return [...text.matchAll(volumePattern)].map(match => ({
+    amount: /^\s*\?/.test(text.slice((match.index ?? 0) + match[0].length)) ? null : parseAmount(match[1]),
+    unit: /^(?:ml|milli)/i.test(match[2]) ? 'ML' : 'OZ', raw: match[0],
+  }));
+}
+
+function typesIn(text: string): OcrEventType[] {
+  const result: OcrEventType[] = [];
+  if (feedPattern.test(text) || volumesIn(text).length) result.push('feed');
+  if (diaperPattern.test(text)) result.push('diaper');
+  if (sleepPattern.test(text)) result.push('sleep');
+  return result;
+}
+
+function segmentsIn(text: string): string[] {
+  const segments: string[] = [];
+  for (const fragment of text.split(';')) {
+    if (segments.length && typesIn(fragment).length === 0) segments[segments.length - 1] += `;${fragment}`;
+    else segments.push(fragment);
+  }
+  return segments;
+}
+
+function makeCandidate(
+  page: OcrPageText, lineNumber: number, rawText: string, segment: string,
+  eventType: OcrEventType, slot: number, contextDate: string | null,
+  contextDateOrigin: 'user' | 'page-header', mode: OcrParseOptions['timeFormat'],
+): OcrCandidate {
+  const warnings: string[] = ['Verify every field against the source before approving.'];
+  const fieldSources: Partial<Record<OcrEditableField, OcrFieldOrigin>> = {};
+  const mark = (field: OcrEditableField, present: boolean, origin: OcrFieldOrigin = 'source') => {
+    fieldSources[field] = present ? origin : 'missing';
+  };
+  const dateMatches = datesIn(segment);
+  const ownDate = dateMatches[0];
+  let localDate = ownDate ? ownDate.value : contextDate;
+  mark('localDate', localDate !== null, ownDate ? 'source' : 'context');
+  if (ownDate && ownDate.value === null) {
+    fieldSources.localDate = 'ambiguous';
+    warnings.push('The source date is incomplete or ambiguous; enter an explicit date.');
+  }
+  const ownClocks = clocksIn(segment, mode);
+  const lineClocks = clocksIn(rawText, mode);
+  const inheritedClock = ownClocks.length === 0 && lineClocks.length === 1 ? lineClocks[0] : undefined;
+  const clocks = ownClocks.length ? ownClocks : inheritedClock ? [inheritedClock] : [];
+  let localTime = clocks[0]?.value ?? null;
+  mark('localTime', localTime !== null, inheritedClock ? 'context' : 'source');
+  if (clocks.some(clock => clock.value === null)) {
+    fieldSources.localTime = 'ambiguous';
+    warnings.push('The time is ambiguous or invalid. Confirm AM/PM or choose a 24-hour sheet.');
+  }
+  if (eventType !== 'sleep' && clocks.length > 1) {
+    localTime = null; fieldSources.localTime = 'ambiguous';
+    warnings.push('Multiple times appear in this event; split or correct it.');
+  }
+  let endLocalDate: string | null = null;
+  let endLocalTime: string | null = null;
+  let feedType: OcrCandidate['feedType'] = null;
+  let bottleType: OcrCandidate['bottleType'] = null;
+  let diaperType: OcrCandidate['diaperType'] = null;
+  let sleepType: OcrCandidate['sleepType'] = null;
+  let amount: number | null = null;
+  let unit: OcrCandidate['unit'] = null;
+
+  if (eventType === 'feed') {
+    const bottle = /\b(?:bottle|btl)\b/i.test(segment);
+    const breast = /\b(?:breast\s*feed(?:ing)?|breastfed|nurs(?:e|ed|ing))\b/i.test(segment);
+    feedType = bottle !== breast ? bottle ? 'BOTTLE' : 'BREAST' : null;
+    const formula = /\bformula\b/i.test(segment);
+    const milk = /\b(?:breast\s*milk|ebm|expressed\s+milk)\b/i.test(segment);
+    bottleType = formula !== milk ? formula ? 'Formula' : 'Breast Milk' : null;
+    if (formula && milk) warnings.push('Mixed formula and breast milk need a reviewer-selected designation and notes.');
+    const volumes = volumesIn(segment);
+    if (volumes.length === 1) ({ amount, unit } = volumes[0]);
+    else if (volumes.length > 1) {
+      fieldSources.amount = 'ambiguous'; fieldSources.unit = 'ambiguous';
+      warnings.push('Multiple quantities appear in this event; choose the recorded amount or split the event.');
+    }
+    if (volumes.length === 1 && amount === null) {
+      fieldSources.amount = 'ambiguous'; warnings.push('The quantity is ambiguous; compare the original and enter a number.');
+    }
+    if (!feedType) warnings.push('Feeding method is not explicit; select it during review.');
+  }
+  if (eventType === 'diaper') {
+    const wet = /\b(?:wet|urine|pee(?:d)?)\b/i.test(segment);
+    const dirty = /\b(?:dirty|stool|poop(?:ed)?|bowel\s+movement)\b/i.test(segment);
+    const dry = /\bdry\b/i.test(segment);
+    diaperType = wet && dirty ? 'BOTH' : wet ? 'WET' : dirty ? 'DIRTY' : dry ? 'DRY' : null;
+    if (dry && (wet || dirty)) { diaperType = null; warnings.push('Conflicting diaper descriptions require review.'); }
+  }
+  if (eventType === 'sleep') {
+    sleepType = /\bnap(?:ped)?\b/i.test(segment) ? 'NAP' : /\b(?:night\s*sleep|overnight|bedtime)\b/i.test(segment) ? 'NIGHT_SLEEP' : null;
+    if (clocks.length === 2) {
+      endLocalTime = clocks[1].value;
+      endLocalDate = dateMatches[1]?.value ?? (localTime && endLocalTime && endLocalTime > localTime ? localDate : null);
+      if (!endLocalDate && endLocalTime) warnings.push('Confirm the sleep end date; crossing midnight is never assumed.');
+    } else if (clocks.length > 2) {
+      localTime = null;
+      warnings.push('Several sleep times appear in this event; split or correct it.');
+    } else if (/\b(?:awake|woke)\b/i.test(segment) && !/\b(?:sleep|slept|asleep|nap(?:ped)?|bedtime)\b/i.test(segment)) {
+      endLocalTime = localTime; endLocalDate = localDate; localTime = null;
+      warnings.push('Only a wake time was recognized; enter the sleep start before importing.');
+    }
+  }
+  if (/\?|\b(?:crossed\s*out|illegible|unclear)\b|~~/i.test(segment)) {
+    warnings.push('Uncertain or crossed-out text appears in this row. Correct it using the source.');
+  }
+  const conflictingText = /\b(?:no|not|without)\s+(?:wet|dirty|dry|stool|poop|urine|pee|bottle|formula|breast\s*milk)\b|\b(?:wet|dirty|dry|bottle|formula|breast\s*milk)\s*\?|~~/i.test(segment);
+  if (conflictingText && eventType === 'diaper') {
+    diaperType = null;
+    warnings.push('Negated, uncertain or crossed-out diaper text needs an explicit type selection.');
+  }
+  if (conflictingText && eventType === 'feed') {
+    feedType = null;
+    amount = null;
+    warnings.push('Negated, uncertain or crossed-out feeding text needs explicit field corrections.');
+  }
+  if (page.confidence !== undefined && page.confidence !== null && page.confidence < 70) warnings.push('Low engine recognition score; manual transcription may be necessary.');
+  if (eventType === 'unknown') warnings.push('No supported care event was identified; classify it or reject this row.');
+  if (!localDate) warnings.push('A complete event date is required.');
+  if (!localTime) warnings.push('An unambiguous event time is required.');
+  mark('eventType', eventType !== 'unknown');
+  mark('endLocalDate', endLocalDate !== null, dateMatches[1] ? 'source' : 'context');
+  mark('endLocalTime', endLocalTime !== null);
+  mark('feedType', feedType !== null); mark('bottleType', bottleType !== null);
+  if (!fieldSources.amount) mark('amount', amount !== null);
+  if (!fieldSources.unit) mark('unit', unit !== null);
+  mark('diaperType', diaperType !== null); mark('sleepType', sleepType !== null); mark('notes', true);
+  return {
+    id: `p${page.page}-l${lineNumber}-${eventType}-${slot}`, eventType, localDate, localTime,
+    endLocalDate, endLocalTime, feedType, bottleType, amount, unit, diaperType, sleepType,
+    notes: segment.trim().slice(0, OCR_MAX_NOTES), approved: false,
+    source: {
+      page: page.page, line: lineNumber, slot, rawText, engine: page.engine || OCR_PARSER_VERSION,
+      confidence: page.confidence ?? null,
+      ...(contextDate ? { contextDate, contextDateOrigin } : {}),
+    }, fieldSources, warnings,
+  };
+}
+
+/** Conservative English line parser. It preserves unknown rows and never writes or approves events. */
+export function parseOcrPages(pages: readonly OcrPageText[], options: OcrParseOptions = {}): OcrCandidate[] {
+  if (!Array.isArray(pages) || pages.length === 0 || pages.length > 50) throw new Error('Supply between 1 and 50 OCR pages.');
+  if (options.defaultDate !== undefined && !isOcrDate(options.defaultDate)) throw new Error('The supplied date must be a valid YYYY-MM-DD date.');
+  if (options.timeFormat !== undefined && !['24h', '12h', 'unknown'].includes(options.timeFormat)) throw new Error('Invalid time format.');
+  const pageIds = new Set<number>();
+  const candidates: OcrCandidate[] = [];
+  for (const page of pages) {
+    if (!Number.isInteger(page.page) || page.page < 1 || page.page > 10000 || pageIds.has(page.page)
+      || typeof page.text !== 'string' || page.text.length > 200000
+      || (page.engine !== undefined && (typeof page.engine !== 'string' || page.engine.length > 200))
+      || (page.confidence !== undefined && page.confidence !== null && (!Number.isFinite(page.confidence) || page.confidence < 0 || page.confidence > 100))) {
+      throw new Error('Invalid or oversized OCR page.');
+    }
+    pageIds.add(page.page);
+    let contextDate: string | null = options.defaultDate ?? null;
+    let contextDateOrigin: 'user' | 'page-header' = 'user';
+    const lines = page.text.replace(/\r\n?/g, '\n').split('\n');
+    for (let index = 0; index < lines.length; index++) {
+      const rawText = lines[index];
+      if (!rawText.trim()) continue;
+      if (rawText.length > OCR_MAX_SOURCE_LINE) throw new Error('An OCR row is too long; crop the page or use manual entry.');
+      const lineDates = datesIn(rawText);
+      const lineTypes = typesIn(rawText);
+      const clockTokens = clocksIn(rawText, options.timeFormat);
+      const datedHeading = /\b(?:log|sheet|records?|date)\b/i.test(rawText)
+        && !/\b(?:wet|dirty|dry|formula|breast|poop|stool|nursing)\b/i.test(rawText)
+        && volumesIn(rawText).length === 0;
+      if (lineDates.length === 1 && (lineTypes.length === 0 || datedHeading) && clockTokens.length === 0) {
+        contextDate = lineDates[0].value; contextDateOrigin = 'page-header';
+        if (contextDate !== null) continue;
+      }
+      // Plain table headings contain no event data. Unknown data rows remain visible.
+      if (lineTypes.length && clockTokens.length === 0 && lineDates.length === 0
+        && /\b(?:date|time|amount|unit|notes)\b/i.test(rawText)
+        && /^(?:[\s|,:/-]|date|time|feeding|feed|bottle|amount|unit|diaper|wet|dirty|sleep|notes|milk|ml|oz)+$/i.test(rawText)) continue;
+      let slot = 0;
+      for (const segment of segmentsIn(rawText)) {
+        const types = typesIn(segment);
+        for (const eventType of types.length ? types : ['unknown'] as const) {
+          candidates.push(makeCandidate(page, index + 1, rawText, segment, eventType, slot++, contextDate, contextDateOrigin, options.timeFormat));
+          if (candidates.length > OCR_MAX_CANDIDATES) throw new Error(`At most ${OCR_MAX_CANDIDATES} draft events are supported per document.`);
+        }
+      }
+    }
+  }
+  return candidates;
+}
