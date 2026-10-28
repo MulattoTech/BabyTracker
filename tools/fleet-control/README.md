@@ -13,8 +13,7 @@ It **does not load MJobs runtime state or install its machine-wide kill scripts*
 - Explicit project-scoped **Add Agent** for one verified Codex or AGY (Google Gemini) session using the actual AO CLI, with live model/reasoning selection, durable uncertain-delivery reconciliation, no automatic initial task, separate maximum agent count, and no duplicate orchestrator.
 - Explicit Start, Pause, Graceful Stop, Emergency Stop, controller Restart,
   Nudge, Find Work, one-pass All Hands and bounded Turbo.
-- Durable task proposals, exclusive file assignments, dependencies and model
-  plans. A model plan is **staged**, not a running model change.
+- Durable task proposals, exclusive file assignments and dependencies. **Change model** now uses real native AO conversation settings or a verified same-session provider handoff. Busy turns finish before a cross-provider switch; Codex Chat preferences can change for the next turn without interruption. Historical staged choices remain inert until explicitly applied.
 - Separate per-run concurrency, dispatch count, elapsed-time, maximum registered agents, free-memory and
   remaining-account-quota limits. Unknown/stale quota blocks new dispatch.
 - A durable dispatch reservation precedes each send. Uncertain delivery is
@@ -24,9 +23,7 @@ It **does not load MJobs runtime state or install its machine-wide kill scripts*
   fresh verification that project sessions stopped clears it.
 - Every native mutation checks live session membership immediately before
   execution. No global process kill, AO-daemon stop, shell command execution,
-  host modification or production database access is implemented. Only one verified
-  Codex orchestrator can be bootstrapped by an explicit Start action; no other
-  agent is provisioned and no initial task is sent.
+  host modification or production database access is implemented. Verified Codex and AGY agent provisioning is explicitly user-initiated and never auto-sends an initial task.
 - Protected loopback API: Host/origin checks, per-instance action token, JSON
   requests, body limit, CSP and no CORS. The supervisor restarts only its own child.
 
@@ -37,7 +34,7 @@ the correct checkout. No model inference is used for dashboard reads.
 
 ## Explicitly incomplete
 
-Automatic multi-agent scaling, model replacement for running agents, and generic project onboarding beyond the registered read-only overview,
+Automatic multi-agent scaling, immediate *mid-turn* model replacement, same-harness AGY Terminal model changes, and generic project onboarding beyond the registered read-only overview,
 verified automatic AGY quota enforcement, per-turn token/duration analytics, disk I/O, acceptance
 evidence ingestion, automated GitHub task discovery and full Mission Control proxy
 integration are not implemented in this slice. The UI marks unsupported metrics
@@ -125,7 +122,7 @@ You can also use **Add Agent** while paused or running to create more BabyTracke
 
 AGY's Google allowance is distinct from Codex's shared percentage. The native AGY usage feed may be missing or stale; the controller never invents percentages or advertises a verified AGY auto-stop. AGY creation requires a warning confirmation. AGY Find Work/Nudge require separate explicit confirmation for each manual turn; AGY is excluded from Turbo, All Hands and automatic queued dispatch. If fresh AGY quota is observed at/below the configured cutoff, new AGY actions are blocked. Configure Google's **AI Credit Overages = Never** if you want to prevent paid overages; the software cannot inspect this account setting. Standalone Gemini CLI is not required or enabled.
 
-See [UNIFIED_FLEET_HUB.md](UNIFIED_FLEET_HUB.md) for shared portal scope and the next project-template migration steps.
+See [UNIFIED_FLEET_HUB.md](UNIFIED_FLEET_HUB.md) for shared portal scope and the next project-template migration steps. See [MODEL_CHANGE_HANDOFF.md](MODEL_CHANGE_HANDOFF.md) for actual model-switch routes, safety limits, and recovery states.
 
 Then start a bounded run explicitly. Default limits are 2 concurrent turns,
 8 dispatches, 60 minutes, 20% minimum remaining Codex allowance, 4 GiB free RAM and 12 agents. Existing local accounts may have different user-set limits (including 7%); the persisted values always take precedence.

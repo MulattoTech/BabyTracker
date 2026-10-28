@@ -6,6 +6,7 @@ const { randomBytes, randomUUID, timingSafeEqual } = require('node:crypto');
 const { configFromEnvironment } = require('./config');
 const { AOAdapter, quotaSnapshot } = require('./adapter');
 const { FleetController } = require('./controller');
+const { NativeModelSwitch } = require('./model-switch');
 const { createSharedProviders } = require('./multi-provider');
 const { createProjectHub } = require('./project-hub');
 
@@ -89,7 +90,11 @@ function createServer({ config, controller, onRestart = null, projectsReader = a
         case 'limits': result = controller.limits(input.limits); break;
         case 'task': result = controller.enqueue(input.task); break;
         case 'assign': result = await controller.assign(input.taskId, input.agentId); break;
-        case 'model-plan': result = await controller.savePlan(input.id, input.plan); break;
+        case 'model-plan': throw Error('Staging-only model plans are no longer supported. Reload this dashboard and use Change model to apply a real native AO change.');
+        case 'model-change': result = await controller.changeModel(input.id, input.plan); break;
+        case 'model-cancel': result = await controller.cancelModelChange(input.id); break;
+        case 'model-reconcile': result = await controller.reconcileModelChange(input.id); break;
+        case 'model-resume': result = await controller.resumeModelChange(input.id); break;
         case 'restart':
           if (!onRestart) throw Error('Controller was started without the restart supervisor. Start it with run.js.');
           controller.pause('Controller restart'); closing = true;
@@ -100,7 +105,7 @@ function createServer({ config, controller, onRestart = null, projectsReader = a
       json(res, 200, result);
     } catch (e) { json(res, 409, { error: String(e.message).slice(0, 500) }); }
   });
-  server.requestTimeout = 20000;
+  server.requestTimeout = 70000;
   server.headersTimeout = 10000;
   return server;
 }
@@ -109,9 +114,9 @@ function main() {
   const config = configFromEnvironment();
   const release = acquireLock(config.stateDir);
   const providers = createSharedProviders(config);
-  const controller = new FleetController(config, { adapter: new AOAdapter(config), quota: () => quotaSnapshot(config.quotaFile), agyUsage: () => providers.usage(), providers: async () => {
+  const controller = new FleetController(config, { adapter: new AOAdapter(config), quota: () => quotaSnapshot(config.quotaFile), nativeModel: new NativeModelSwitch(config), agyUsage: () => providers.usage(), providers: async () => {
     const value = await providers.get();
-    return { ...value, source: 'MJobs verified Codex model catalog (read-only), local AGY model availability. Existing agent plans remain staged only.' };
+    return { ...value, source: 'MJobs verified Codex model catalog (read-only), local AGY model availability. Agent model changes use verified native AO next-turn settings and provider handoff.' };
   } });
   let ending = false;
   const stop = code => {
