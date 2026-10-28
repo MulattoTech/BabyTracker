@@ -113,13 +113,23 @@ export function validateOcrCandidate(
   }
 
   const source = object(value.source);
+  const crop = source ? object(source.crop) : null;
+  const cropValid = source?.crop === undefined || (!!crop && ['x', 'y', 'width', 'height'].every(key =>
+    Number.isInteger(crop[key]) && Number(crop[key]) >= 0 && Number(crop[key]) <= 2400,
+  ) && Number(crop.width) > 0 && Number(crop.height) > 0 && Number(crop.x) + Number(crop.width) <= 2400 && Number(crop.y) + Number(crop.height) <= 2400);
+  const recognitionModes = ['printed-baseline', 'handwriting-unsupported', 'manual-transcription'] as const;
+  const recognitionMode = source?.recognitionMode === undefined && source?.engine === 'manual'
+    ? 'manual-transcription' : source?.recognitionMode;
   const sourceValid = source && ['page', 'line', 'slot'].every(key =>
     typeof source[key] === 'number' && Number.isInteger(source[key]) && Number(source[key]) >= (key === 'slot' ? 0 : 1) && Number(source[key]) <= 100000,
   ) && typeof source.rawText === 'string' && source.rawText.length <= OCR_MAX_SOURCE_LINE
     && typeof source.engine === 'string' && source.engine.length > 0 && source.engine.length <= 200
     && (source.confidence === null || (typeof source.confidence === 'number' && Number.isFinite(source.confidence) && source.confidence >= 0 && source.confidence <= 100))
     && (source.contextDate === undefined || isOcrDate(source.contextDate))
-    && (source.contextDateOrigin === undefined || ['user', 'page-header'].includes(String(source.contextDateOrigin)));
+    && (source.contextDateOrigin === undefined || ['user', 'page-header'].includes(String(source.contextDateOrigin)))
+    && cropValid
+    && (source.extractionVersion === undefined || (typeof source.extractionVersion === 'string' && source.extractionVersion.length > 0 && source.extractionVersion.length <= 300))
+    && (recognitionMode === undefined || recognitionModes.includes(recognitionMode as typeof recognitionModes[number]));
   if (!sourceValid) errors.push('Invalid source reference.');
   const evidence = object(value.fieldSources);
   const fieldSources: Partial<Record<OcrEditableField, OcrFieldOrigin>> = {};
@@ -142,6 +152,9 @@ export function validateOcrCandidate(
       rawText: source.rawText as string, engine: source.engine as string, confidence: source.confidence as number | null,
       ...(source.contextDate ? { contextDate: source.contextDate as string } : {}),
       ...(source.contextDateOrigin ? { contextDateOrigin: source.contextDateOrigin as 'user' | 'page-header' } : {}),
+      ...(crop ? { crop: crop as NonNullable<OcrCandidate['source']['crop']> } : {}),
+      ...(source.extractionVersion ? { extractionVersion: source.extractionVersion as string } : {}),
+      ...(recognitionMode ? { recognitionMode: recognitionMode as typeof recognitionModes[number] } : {}),
     },
     fieldSources, warnings: value.warnings as string[],
   };

@@ -5,6 +5,7 @@ import { executeExternalImport } from '@/src/lib/importers/execute';
 import { parseOcrPages } from './parser';
 import { isOcrDate } from './validation';
 import { OCR_LIMITS, acquireOcrSlot, identifyOcrUpload, recognizeOcrDocument } from './intake';
+import type { OcrRecognitionAdapter } from './intake';
 import { OCR_PARSER_VERSION } from './types';
 import { openOcrState, sealOcrState } from './crypto';
 import { OcrError } from './errors';
@@ -41,7 +42,7 @@ export async function requireOcrDocument(db: Prisma.TransactionClient, actor: Oc
 export async function createOcrDocument(db: PrismaClient, actor: OcrActor, input: {
   bytes: Buffer; name: string; babyId: string; timeZone: string; defaultDate?: string;
   timeFormat: '24h' | '12h' | 'unknown'; rotation: number; retentionDays: number;
-  signal?: AbortSignal;
+  signal?: AbortSignal; recognitionAdapter?: OcrRecognitionAdapter;
 }): Promise<OcrDocumentView> {
   const baby = await db.baby.findFirst({ where: { id: input.babyId, familyId: actor.familyId, deletedAt: null, inactive: false }, select: { id: true } });
   if (!baby) throw new OcrError('Select a baby in this family.', 404);
@@ -59,7 +60,7 @@ export async function createOcrDocument(db: PrismaClient, actor: OcrActor, input
   const release = acquireOcrSlot(actor.familyId);
   const stored: string[] = [];
   try {
-    const pages = await recognizeOcrDocument(input.bytes, input.rotation, input.signal);
+    const pages = await recognizeOcrDocument(input.bytes, input.rotation, input.signal, input.recognitionAdapter);
     const rows = parseOcrPages(pages, { defaultDate: input.defaultDate, timeFormat: input.timeFormat });
     if (rows.length > OCR_LIMITS.rows) throw new OcrError('More than 200 events were found. Upload a smaller section.');
     if (input.signal?.aborted) throw new OcrError('Recognition cancelled. No care records were created.', 499);

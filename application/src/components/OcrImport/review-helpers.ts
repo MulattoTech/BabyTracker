@@ -9,7 +9,7 @@ export function manualOcrRow(page: number, id: string): OcrCandidate {
     id: `manual-${id}`, eventType: 'unknown', localDate: null, localTime: null,
     endLocalDate: null, endLocalTime: null, feedType: null, bottleType: null,
     amount: null, unit: null, diaperType: null, sleepType: null, notes: '', approved: false,
-    source: { page, line: 1, slot: 0, rawText: '', engine: 'manual', confidence: null },
+    source: { page, line: 1, slot: 0, rawText: '', engine: 'manual', confidence: null, recognitionMode: 'manual-transcription' },
     fieldSources: {}, warnings: ['Manually transcribed from the source; verify every field.'],
   };
 }

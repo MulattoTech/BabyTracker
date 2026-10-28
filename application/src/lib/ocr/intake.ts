@@ -34,7 +34,17 @@ export interface RecognizedPage {
   text: string;
   confidence: number | null;
   engine: string;
+  recognitionMode: 'printed-baseline' | 'handwriting-unsupported' | 'manual-transcription';
   image: Buffer;
+  width: number;
+  height: number;
+  lines: { text: string; crop: { x: number; y: number; width: number; height: number } }[];
+}
+
+export interface OcrRecognitionAdapter {
+  readonly id: string;
+  prepare(signal?: AbortSignal): Promise<{ readonly engineVersion: string; readonly modelVersion: string }>;
+  recognize(imagePath: string, signal?: AbortSignal): Promise<{ readonly text: string; readonly confidence: number | null; readonly lines: RecognizedPage['lines']; readonly recognitionMode: RecognizedPage['recognitionMode'] }>;
 }
 
 async function run(command: string, args: string[], signal?: AbortSignal): Promise<string> {
@@ -70,8 +80,8 @@ async function verifiedEngine(signal?: AbortSignal): Promise<string> {
   return `${version}; eng-fast sha256:${OCR_MODEL_SHA256}; psm6`;
 }
 
-export function readTesseractTsv(tsv: string): { text: string; confidence: number | null } {
-  const lines = new Map<string, string[]>();
+export function readTesseractTsv(tsv: string): { text: string; confidence: number | null; lines: RecognizedPage['lines'] } {
+  const lines = new Map<string, { words: string[]; x: number; y: number; right: number; bottom: number }>();
   const confidences: number[] = [];
   for (const row of tsv.split('\n').slice(1)) {
     const cells = row.split('\t');
@@ -79,21 +89,54 @@ export function readTesseractTsv(tsv: string): { text: string; confidence: numbe
     const word = cells.slice(11).join('\t').trim();
     if (!word) continue;
     const id = cells.slice(1, 5).join('-');
-    if (!lines.has(id)) lines.set(id, []);
-    lines.get(id)!.push(word);
+    const x = Number(cells[6]); const y = Number(cells[7]);
+    const width = Number(cells[8]); const height = Number(cells[9]);
+    if (![x, y, width, height].every(Number.isInteger) || x < 0 || y < 0 || width < 1 || height < 1) {
+      throw new OcrError('The local recognition engine returned invalid page coordinates. No care records were created.', 503);
+    }
+    if (!lines.has(id)) lines.set(id, { words: [], x, y, right: x + width, bottom: y + height });
+    const line = lines.get(id)!;
+    line.words.push(word); line.x = Math.min(line.x, x); line.y = Math.min(line.y, y);
+    line.right = Math.max(line.right, x + width); line.bottom = Math.max(line.bottom, y + height);
     const confidence = Number(cells[10]);
     if (Number.isFinite(confidence) && confidence >= 0 && confidence <= 100) confidences.push(confidence);
   }
+  const recognizedLines = [...lines.values()].map(line => ({
+    text: line.words.join(' '),
+    crop: { x: line.x, y: line.y, width: line.right - line.x, height: line.bottom - line.y },
+  }));
   return {
-    text: [...lines.values()].map(words => words.join(' ')).join('\n'),
+    text: recognizedLines.map(line => line.text).join('\n'),
     confidence: confidences.length ? confidences.reduce((a, b) => a + b, 0) / confidences.length : null,
+    lines: recognizedLines,
   };
 }
 
-export async function recognizeOcrDocument(bytes: Buffer, rotation = 0, signal?: AbortSignal): Promise<RecognizedPage[]> {
+/** Printed English baseline. This adapter contract is replaceable; it is not handwriting proof. */
+export const tesseractPrintedBaseline: OcrRecognitionAdapter = {
+  id: 'tesseract-printed-baseline',
+  async prepare(signal) {
+    const modelVersion = await verifiedEngine(signal);
+    return { engineVersion: modelVersion.split(';')[0], modelVersion };
+  },
+  async recognize(imagePath, signal) {
+    const tsv = await run('tesseract', [imagePath, 'stdout', '-l', 'eng', '--psm', '6', '-c', 'tessedit_create_tsv=1'], signal);
+    if (!tsv.startsWith('level\tpage_num\tblock_num\t')) throw new OcrError('The local recognition engine returned an unsupported result. No care records were created.', 503);
+    return { ...readTesseractTsv(tsv), recognitionMode: 'printed-baseline' };
+  },
+};
+
+export async function recognizeOcrDocument(bytes: Buffer, rotation = 0, signal?: AbortSignal, adapter: OcrRecognitionAdapter = tesseractPrintedBaseline): Promise<RecognizedPage[]> {
   const mime = identifyOcrUpload(bytes);
   if (![0, 90, 180, 270].includes(rotation)) throw new OcrError('Choose a rotation of 0, 90, 180 or 270 degrees.');
-  const engine = await verifiedEngine(signal);
+  const identity = await adapter.prepare(signal);
+  if (typeof adapter.id !== 'string' || adapter.id.length === 0 || adapter.id.length > 80
+    || !identity || typeof identity.engineVersion !== 'string' || identity.engineVersion.length === 0 || identity.engineVersion.length > 100
+    || typeof identity.modelVersion !== 'string' || identity.modelVersion.length === 0 || identity.modelVersion.length > 150) {
+    throw new OcrError('The local recognition adapter identity is invalid.', 503);
+  }
+  const engine = `${adapter.id}; ${identity.engineVersion}; ${identity.modelVersion}`;
+  if (engine.length > 200) throw new OcrError('The local recognition adapter identity is too long.', 503);
   const dir = await mkdtemp(path.join(tmpdir(), 'babytracker-ocr-'));
   try {
     let count = 1;
@@ -115,12 +158,15 @@ export async function recognizeOcrDocument(bytes: Buffer, rotation = 0, signal?:
         input = await readFile(`${prefix}.png`);
       }
       let image: Buffer;
+      let width = 0;
+      let height = 0;
       try {
         const metadata = await sharp(input, { limitInputPixels: OCR_LIMITS.pixels }).metadata();
         if ((metadata.pages || 1) !== 1) throw new OcrError('Animated or multi-frame images are not supported.');
-        image = await sharp(input, { limitInputPixels: OCR_LIMITS.pixels }).autoOrient().rotate(rotation)
+        const normalized = await sharp(input, { limitInputPixels: OCR_LIMITS.pixels }).autoOrient().rotate(rotation)
           .resize({ width: 2400, height: 2400, fit: 'inside', withoutEnlargement: true })
-          .flatten({ background: '#ffffff' }).grayscale().normalize().sharpen().png().toBuffer();
+          .flatten({ background: '#ffffff' }).grayscale().normalize().sharpen().png().toBuffer({ resolveWithObject: true });
+        image = normalized.data; width = normalized.info.width; height = normalized.info.height;
       } catch (error) {
         if (error instanceof OcrError) throw error;
         throw new OcrError('The image is invalid or exceeds the 24-megapixel limit.');
@@ -130,11 +176,19 @@ export async function recognizeOcrDocument(bytes: Buffer, rotation = 0, signal?:
       // Explicit output flags work with a model-only TESSDATA_PREFIX; a named
       // `tsv` config requires a separate configs/tsv file and can silently fall
       // back to plain text when that file is absent.
-      const tsv = await run('tesseract', [imagePath, 'stdout', '-l', 'eng', '--psm', '6', '-c', 'tessedit_create_tsv=1'], signal);
-      if (!tsv.startsWith('level\tpage_num\tblock_num\t')) throw new OcrError('The local recognition engine returned an unsupported result. No care records were created.', 503);
-      const result = readTesseractTsv(tsv);
+      const result = await adapter.recognize(imagePath, signal);
+      if (!result || typeof result.text !== 'string' || result.text.length > OCR_LIMITS.text
+        || !['printed-baseline', 'handwriting-unsupported', 'manual-transcription'].includes(result.recognitionMode)
+        || (result.confidence !== null && (!Number.isFinite(result.confidence) || result.confidence < 0 || result.confidence > 100))
+        || !Array.isArray(result.lines) || result.lines.length > OCR_LIMITS.rows
+        || result.lines.some(line => typeof line.text !== 'string' || !line.crop
+          || ![line.crop.x, line.crop.y, line.crop.width, line.crop.height].every(Number.isInteger)
+          || line.crop.x < 0 || line.crop.y < 0 || line.crop.width < 1 || line.crop.height < 1
+          || line.crop.x + line.crop.width > width || line.crop.y + line.crop.height > height)) {
+        throw new OcrError('The local recognition adapter returned invalid page evidence.', 503);
+      }
       if (result.text.length > OCR_LIMITS.text) throw new OcrError('Too much text was found. Upload a smaller section.');
-      pages.push({ page, ...result, engine, image });
+      pages.push({ page, ...result, engine, extractionVersion: identity.modelVersion, width, height, image });
     }
     return pages;
   } finally {
