@@ -483,6 +483,15 @@ export const SideNav: React.FC<SideNavProps> = ({
             onClick={onNavigate}
             className="side-nav-item"
           />
+          {isAdmin && (
+            <SideNavItem
+              path="/ocr-import"
+              label={t('Document import')}
+              isActive={currentPath.endsWith('/ocr-import')}
+              onClick={onNavigate}
+              className="side-nav-item"
+            />
+          )}
           <SideNavItem
             path="/nursery-mode"
             label={t('Nursery Mode')}

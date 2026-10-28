@@ -222,6 +222,7 @@ model Family {
   photos         Photo[]
   photoLogs      PhotoLog[]
   externalImportRecords ExternalImportRecord[]
+  ocrDocuments   OcrDocument[]
   foods          Food[]
   foodLogs       FoodLog[]
   babyAllergens  BabyAllergen[]
@@ -1837,4 +1838,49 @@ model ExternalImportRecord {
   @@unique([familyId, providerId, sourceEntityType, sourceRecordId])
   @@index([familyId, providerId])
   @@index([targetEntityType, targetRecordId])
+}
+
+// BabyTracker: additive OCR review state; care events stay in the upstream tables.
+model OcrDocument {
+  id             String   @id @default(uuid())
+  familyId       String
+  babyId         String
+  sourceHash     String
+  originalName   String
+  mimeType       String
+  byteSize       Int
+  sourceFile     String?
+  previewFiles   String
+  pageCount      Int
+  parserVersion  String
+  sourceTimezone String
+  originalState  String // AES-GCM encrypted extraction, never overwritten by review
+  reviewState    String // AES-GCM encrypted editable candidates
+  revision       Int      @default(0)
+  commitHash     String?
+  resultJson     String?
+  committedAt    DateTime?
+  sourceExpiresAt DateTime
+  purgedAt       DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  family Family @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  audits OcrAudit[]
+
+  @@unique([familyId, babyId, sourceHash])
+  @@index([familyId, babyId, createdAt])
+  @@index([sourceExpiresAt])
+}
+
+model OcrAudit {
+  id          String   @id @default(uuid())
+  documentId  String
+  action      String
+  actorId     String?
+  snapshot    String // AES-GCM encrypted review/correction snapshot
+  createdAt   DateTime @default(now())
+
+  document OcrDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  @@index([documentId, createdAt])
 }

@@ -29,6 +29,8 @@ export function DynamicTitle({ baseTitle = 'Sprout Track' }: DynamicTitleProps) 
       ? t('Calendar')
       : pathname?.includes('/reports')
       ? t('Reports')
+      : pathname?.includes('/ocr-import')
+      ? t('Document import')
       : pathname?.includes('/full-log')
       ? t('Full Log')
       : null;
