@@ -11,6 +11,11 @@ export interface OcrSource {
   readonly slot: number;
   readonly rawText: string;
   readonly engine: string;
+  /** Exact engine/model build reported by the local adapter. */
+  readonly modelVersion?: string;
+  /** Optional word/page crop bounds in pixels of the retained source page. */
+  readonly crop?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  readonly recognitionMode?: 'printed-baseline' | 'handwriting-unsupported' | 'manual-transcription';
   /** The engine's 0–100 score, not a calibrated probability of field correctness. */
   readonly confidence: number | null;
   readonly contextDate?: string;
@@ -42,6 +47,9 @@ export interface OcrPageText {
   readonly text: string;
   readonly confidence?: number | null;
   readonly engine?: string;
+  readonly modelVersion?: string;
+  readonly recognitionMode?: 'printed-baseline' | 'handwriting-unsupported' | 'manual-transcription';
+  readonly crop?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
 }
 
 export interface OcrParseOptions {

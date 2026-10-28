@@ -199,6 +199,9 @@ function makeCandidate(
     source: {
       page: page.page, line: lineNumber, slot, rawText, engine: page.engine || OCR_PARSER_VERSION,
       confidence: page.confidence ?? null,
+      ...(page.modelVersion ? { modelVersion: page.modelVersion } : {}),
+      ...(page.crop ? { crop: page.crop } : {}),
+      ...(page.recognitionMode ? { recognitionMode: page.recognitionMode } : {}),
       ...(contextDate ? { contextDate, contextDateOrigin } : {}),
     }, fieldSources, warnings,
   };
@@ -215,6 +218,10 @@ export function parseOcrPages(pages: readonly OcrPageText[], options: OcrParseOp
     if (!Number.isInteger(page.page) || page.page < 1 || page.page > 10000 || pageIds.has(page.page)
       || typeof page.text !== 'string' || page.text.length > 200000
       || (page.engine !== undefined && (typeof page.engine !== 'string' || page.engine.length > 200))
+      || (page.modelVersion !== undefined && (typeof page.modelVersion !== 'string' || page.modelVersion.length > 300))
+      || (page.recognitionMode !== undefined && !['printed-baseline', 'handwriting-unsupported', 'manual-transcription'].includes(page.recognitionMode))
+      || (page.crop !== undefined && (!page.crop || ![page.crop.x, page.crop.y, page.crop.width, page.crop.height].every(Number.isFinite)
+        || page.crop.x < 0 || page.crop.y < 0 || page.crop.width <= 0 || page.crop.height <= 0))
       || (page.confidence !== undefined && page.confidence !== null && (!Number.isFinite(page.confidence) || page.confidence < 0 || page.confidence > 100))) {
       throw new Error('Invalid or oversized OCR page.');
     }

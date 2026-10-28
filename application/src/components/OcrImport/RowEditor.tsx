@@ -85,6 +85,7 @@ export default function RowEditor({ row, number, timeZone, offsets, locked, onEd
       <summary>{t('Recognized text, uncertainty and provenance')}</summary>
       <p className="ocr-hint">{t('Source page')}: {row.source.page} · {t('Line')}: {row.source.line} · {t('Engine')}: {row.source.engine}</p>
       <p className="ocr-hint">{t('Engine recognition score')}: {row.source.confidence === null ? t('Unavailable') : `${row.source.confidence.toFixed(1)} / 100`} · {t('This is not a field accuracy score.')}</p>
+      <p className="ocr-hint">{t(row.source.recognitionMode === 'handwriting-unsupported' ? 'Handwriting is unsupported; use manual transcription.' : row.source.recognitionMode === 'manual-transcription' ? 'Manual transcription — compare every field with the original page.' : 'Printed-text Tesseract baseline only; handwriting recognition is not proven.')}</p>
       <pre className="ocr-raw-text">{row.source.rawText || t('Manual transcription — compare with the original page.')}</pre>
       {warnings.length > 0 && <ul className="ocr-warnings">{warnings.map(message => <li key={message}>{t(message)}</li>)}</ul>}
       <dl className="ocr-provenance">{Object.entries(row.fieldSources).map(([field, origin]) => <div key={field}><dt>{t(fieldLabels[field as OcrEditableField] || field)}</dt><dd>{t(originLabels[origin] || origin)}</dd></div>)}</dl>
