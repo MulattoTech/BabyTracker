@@ -88,6 +88,7 @@ function createServer({ config, controller, onRestart = null, projectsReader = a
         case 'all-hands': result = await controller.allHands(); break;
         case 'turbo': result = controller.turbo(input.enabled); break;
         case 'limits': result = controller.limits(input.limits); break;
+        case 'quota-policy': result = await controller.updateQuotaPolicy(input.minimumRemainingPercent); break;
         case 'task': result = controller.enqueue(input.task); break;
         case 'assign': result = await controller.assign(input.taskId, input.agentId); break;
         case 'model-plan': throw Error('Staging-only model plans are no longer supported. Reload this dashboard and use Change model to apply a real native AO change.');

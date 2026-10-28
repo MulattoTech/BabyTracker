@@ -56,7 +56,7 @@ function quotaSnapshot(file, now = Date.now()) {
   if (value.ordinaryUsageAllowed === false || value.status === 'emergency_locked') return unavailable('Codex use is currently stopped by the shared account guard');
   const windows = Array.isArray(value.windows) ? value.windows.filter(w => Number.isFinite(w.remainingPercent) && w.remainingPercent >= 0 && w.remainingPercent <= 100 && (!w.resetsAt || (Number.isFinite(Date.parse(w.resetsAt)) && Date.parse(w.resetsAt) > now))) : [];
   if (!windows.length) return unavailable('No valid unexpired quota window');
-  return { available: true, fresh: true, remainingPercent: Math.min(...windows.map(w => w.remainingPercent)), sampledAt: value.lastSuccessfulPoll, windows: windows.map(w => ({ label: w.label, remainingPercent: w.remainingPercent, resetsAt: w.resetsAt || null })), source: 'Read-only Codex account telemetry', scope: 'shared account; not BabyTracker-specific consumption' };
+  return { available: true, fresh: true, sharedEmergencyGuard: { thresholdPercent:Number.isInteger(value.config?.thresholdPercent)?value.config.thresholdPercent:null, armed:value.config?.autoKillArmed===true, tripped:value.config?.tripped===true }, remainingPercent: Math.min(...windows.map(w => w.remainingPercent)), sampledAt: value.lastSuccessfulPoll, windows: windows.map(w => ({ label: w.label, remainingPercent: w.remainingPercent, resetsAt: w.resetsAt || null })), source: 'Read-only Codex account telemetry', scope: 'shared account; not BabyTracker-specific consumption' };
 }
 
 module.exports = { AOAdapter, quotaSnapshot };

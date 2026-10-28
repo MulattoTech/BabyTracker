@@ -49,6 +49,26 @@ class FleetController {
     return all.filter(s => s.projectId === PROJECT);
   }
   quota() { return this.quotaReader(); }
+  quotaPolicy() {
+    const q=this.quota(), configured=this.state.limits.minimumRemainingPercent;
+    const sharedStop=Number.isInteger(q.sharedEmergencyGuard?.thresholdPercent)?q.sharedEmergencyGuard.thresholdPercent:null;
+    const floor=Math.max(7,sharedStop??7), effective=Number.isInteger(configured)&&configured>=7&&configured<=99?Math.max(floor,configured):100;
+    const fresh=q.fresh===true&&Number.isFinite(q.remainingPercent)&&q.remainingPercent>=0&&q.remainingPercent<=100;
+    const blocked=!fresh||q.remainingPercent<=effective;
+    return {configuredMinimumRemainingPercent:configured,minimumRemainingPercent:effective,minimumAllowedPercent:floor,remainingPercent:fresh?q.remainingPercent:null,fresh,blocked,
+      sharedEmergencyGuard:q.sharedEmergencyGuard||null,
+      reason:!fresh?(q.reason||'Fresh Codex quota is required')+'. New Codex work is blocked.':blocked?'QUOTA HOLD: '+q.remainingPercent+'% remaining; new Codex starts/tasks require more than '+effective+'% (configured threshold).':'Codex quota allows work: '+q.remainingPercent+'% remaining; required more than '+effective+'%.',
+      note:sharedStop===null?'Shared emergency guard status unavailable. This project setting does not configure the machine-wide guard.':'Shared emergency stop: '+sharedStop+'% ('+(q.sharedEmergencyGuard.armed?'armed':'not armed')+'). This project setting does not change it.'};
+  }
+  async updateQuotaPolicy(value) {
+    return this.serial(async()=>{
+      if(['emergency','draining'].includes(this.state.mode))throw Error('Finish emergency/drain recovery before changing quota policy');
+      const floor=this.quotaPolicy().minimumAllowedPercent;
+      if(!Number.isInteger(value)||value<floor||value>99)throw Error('Start/new-work quota limit must be '+floor+' to 99%. Emergency protection cannot be bypassed.');
+      this.state.limits.minimumRemainingPercent=value;this.save();this.audit('quota_policy_changed',{minimumRemainingPercent:value});
+      return {ok:true,quotaPolicy:this.quotaPolicy(),note:'Quota limit saved at '+value+'%. Emergency guard and fleet running/paused state are unchanged.'};
+    });
+  }
   guard({ requireRunning = true, session = null, manualAgy = false } = {}) {
     if (this.state.mode === 'emergency') return 'BabyTracker emergency stop is latched';
     if (this.state.mode === 'draining') return 'BabyTracker is draining';
@@ -64,9 +84,8 @@ class FleetController {
     }
     if (session && session.harness !== 'codex') return 'Unsupported provider';
     if (session?.harness === 'codex') {
-      const q = this.quota();
-      if (!q.fresh || q.remainingPercent === null) return q.reason || 'Fresh Codex quota is required';
-      if (q.remainingPercent <= this.state.limits.minimumRemainingPercent) return 'Configured remaining Codex quota threshold reached';
+      const policy=this.quotaPolicy();
+      if(policy.blocked)return policy.reason;
     }
     return null;
   }
@@ -99,10 +118,10 @@ class FleetController {
       else if (idle(s)) label = 'Available for Dispatch';
       if (!busy(s) && ['queued','submitting','transitioning','unverified','reconcile_required','resume_required'].includes(this.state.plans[s.id]?.status))
         label = this.state.plans[s.id].status === 'transitioning' ? 'Switching model' : 'Model change ' + this.state.plans[s.id].status.replace(/_/g, ' ');
-      return { id: s.id, projectId: PROJECT, name: s.displayName || s.id, kind: s.kind || 'worker', mode: s.mode || 'unknown', harness: s.harness || 'unknown', model: s.model || 'unknown', effort: s.effort || null, label, busy: busy(s), idle: idle(s), taskId: task?.id || null, issue: task?.issue || null, prs: (s.prs || []).map(p => ({ number: p.number, state: p.state, ci: p.ci, url: typeof p.url === 'string' && p.url.startsWith('https://github.com/' + SOURCE_REPO + '/') ? p.url : null })), cooldownSeconds: Math.ceil(cooldown / 1000), dispatchEta: cooldown > 0 ? new Date(now + cooldown).toISOString() : null, unresolvedDelivery: !!ambiguous, tokens: null, turnStatistics: null, lastActivity: s.activity?.timestamp || null };
+      return { id: s.id, projectId: PROJECT, name: s.displayName || s.id, kind: s.kind || 'worker', mode: s.mode || 'unknown', runtimeActive:active(s), harness: s.harness || 'unknown', model: s.model || 'unknown', effort: s.effort || null, label, busy: busy(s), idle: idle(s), taskId: task?.id || null, issue: task?.issue || null, prs: (s.prs || []).map(p => ({ number: p.number, state: p.state, ci: p.ci, url: typeof p.url === 'string' && p.url.startsWith('https://github.com/' + SOURCE_REPO + '/') ? p.url : null })), cooldownSeconds: Math.ceil(cooldown / 1000), dispatchEta: cooldown > 0 ? new Date(now + cooldown).toISOString() : null, unresolvedDelivery: !!ambiguous, tokens: null, turnStatistics: null, lastActivity: s.activity?.timestamp || null };
     });
     const agyUsage = await this.agyReader().catch(() => ({ fresh: false, remainingPercent: null, reason: 'AGY usage unavailable' }));
-    const result = { observedAt: new Date(now).toISOString(), agyUsage, provisioning: this.state.provisioning || null, projectId: PROJECT, sourceRepository: SOURCE_REPO, issueRepository: ISSUE_REPO, mode: this.state.mode, runtime, sessions: rows, tasks: this.state.tasks, plans: this.state.plans, limits: this.state.limits, run: this.state.run, quota: this.quota(), resources: this.resources(), dispatchBlocker: this.guard(), codexDispatchBlocker: this.guard({ session: { harness: 'codex' } }), emergency: this.state.emergency, summary: { total: rows.length, working: rows.filter(x => x.busy).length, available: rows.filter(x => x.label === 'Available for Dispatch').length, blocked: rows.filter(x => x.label === 'Blocked').length }, acceptance: { status: 'NOT_ASSESSED', percent: null, note: 'Task completion is separate from requirement acceptance; no acceptance evidence has been imported.' }, capabilities: { scopedControl: true, persistentQueue: true, boundedDispatch: true, independentReviewGate: true, modelPlans: true, modelReplacement: false, nativeChatNextTurnModel: !!this.modelChanges.native, nativeTuiProviderHandoff: !!this.modelChanges.native, queuedGracefulModelChange: !!this.modelChanges.native, sameHarnessTuiModelChange: false, firstCodexBootstrap: typeof this.adapter.provisionCodex === 'function', explicitAgentProvisioning: typeof this.adapter.provisionSelection === 'function', dynamicProvisioning: true, automaticWorkerScaling: false, geminiBudget: false, diskIO: false, perAgentTokens: false } };
+    const result = { observedAt: new Date(now).toISOString(), agyUsage, provisioning: this.state.provisioning || null, projectId: PROJECT, sourceRepository: SOURCE_REPO, issueRepository: ISSUE_REPO, mode: this.state.mode, runtime, sessions: rows, tasks: this.state.tasks, plans: this.state.plans, limits: this.state.limits, run: this.state.run, quota: this.quota(), quotaPolicy:this.quotaPolicy(), resources: this.resources(), dispatchBlocker: this.guard(), codexDispatchBlocker: this.guard({ session: { harness: 'codex' } }), emergency: this.state.emergency, summary: { total: rows.length, working: rows.filter(x => x.busy).length, available: rows.filter(x => x.label === 'Available for Dispatch').length, blocked: rows.filter(x => x.label === 'Blocked').length }, acceptance: { status: 'NOT_ASSESSED', percent: null, note: 'Task completion is separate from requirement acceptance; no acceptance evidence has been imported.' }, capabilities: { scopedControl: true, persistentQueue: true, boundedDispatch: true, independentReviewGate: true, modelPlans: true, modelReplacement: false, nativeChatNextTurnModel: !!this.modelChanges.native, nativeTuiProviderHandoff: !!this.modelChanges.native, queuedGracefulModelChange: !!this.modelChanges.native, sameHarnessTuiModelChange: false, firstCodexBootstrap: typeof this.adapter.provisionCodex === 'function', explicitAgentProvisioning: typeof this.adapter.provisionSelection === 'function', dynamicProvisioning: true, automaticWorkerScaling: false, geminiBudget: false, diskIO: false, perAgentTokens: false } };
     this.lastSnapshot = result; return result;
   }
   async serial(fn) {
@@ -221,8 +240,9 @@ class FleetController {
   }
   limits(input) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw Error('Limits object required');
-    const ranges = { concurrency: [1, 32], maxDispatches: [1, 1000], maxMinutes: [1, 720], minimumRemainingPercent: [1, 99], minimumFreeMemoryGiB: [1, 128], maxAgents: [1, 64] };
+    const ranges = { concurrency: [1, 32], maxDispatches: [1, 1000], maxMinutes: [1, 720], minimumRemainingPercent: [7, 99], minimumFreeMemoryGiB: [1, 128], maxAgents: [1, 64] };
     for (const [key, value] of Object.entries(input)) if (!ranges[key] || !Number.isInteger(value) || value < ranges[key][0] || value > ranges[key][1]) throw Error('Invalid limit: ' + key);
+    if(input.minimumRemainingPercent!==undefined&&input.minimumRemainingPercent<this.quotaPolicy().minimumAllowedPercent)throw Error('Quota limit cannot be below shared emergency protection');
     if (this.state.mode === 'running') throw Error('Pause before changing a run budget');
     this.state.limits = { ...this.state.limits, ...input }; this.save(); this.audit('limits_changed', input); return this.state.limits;
   }
