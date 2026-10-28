@@ -25,6 +25,16 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Install local OCR tools
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr poppler-utils fonts-dejavu-core util-linux
+
+      - name: Pin English OCR model
+        run: |
+          mkdir -p "$RUNNER_TEMP/babytracker-ocr-model"
+          curl --fail --location --max-time 60 https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/87416418657359cb625c412a48b6e1d6d41c29bd/eng.traineddata --output "$RUNNER_TEMP/babytracker-ocr-model/eng.traineddata"
+          echo "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2  $RUNNER_TEMP/babytracker-ocr-model/eng.traineddata" | sha256sum -c -
+          echo "TESSDATA_PREFIX=$RUNNER_TEMP/babytracker-ocr-model" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: npm ci
 
