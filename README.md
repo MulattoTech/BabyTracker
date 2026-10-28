@@ -16,8 +16,7 @@ Both MJobs and BabyTracker use that shared source; their runtime state stays sep
 ```powershell
 cd C:\Tools\Dev\BabyTracker
 .\scripts\backup.ps1
-docker compose build sprout
-docker compose up -d sprout
+.\scripts\update-babytracker.ps1 -Build
 ```
 The tracker remains bound to loopback port 3123. Existing HTTPS routing and the
 `babytracker-sprout-db`, `babytracker-sprout-env` and `babytracker-sprout-files`
