@@ -13,6 +13,10 @@ export interface OcrSource {
   readonly engine: string;
   /** The engine's 0–100 score, not a calibrated probability of field correctness. */
   readonly confidence: number | null;
+  readonly modelVersion?: string;
+  /** Normalized page coordinates, retained with the immutable page/line evidence. */
+  readonly crop?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  readonly recognitionMode?: 'printed-baseline' | 'handwriting-unsupported' | 'manual-transcription';
   readonly contextDate?: string;
   readonly contextDateOrigin?: 'user' | 'page-header';
 }
@@ -42,6 +46,10 @@ export interface OcrPageText {
   readonly text: string;
   readonly confidence?: number | null;
   readonly engine?: string;
+  readonly modelVersion?: string;
+  readonly recognitionMode?: 'printed-baseline' | 'handwriting-unsupported' | 'manual-transcription';
+  /** One normalized crop per newline-delimited source line. */
+  readonly lineCrops?: readonly ({ readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null)[];
 }
 
 export interface OcrParseOptions {

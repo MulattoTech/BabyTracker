@@ -113,11 +113,18 @@ export function validateOcrCandidate(
   }
 
   const source = object(value.source);
+  const sourceCrop = source ? object(source.crop) : null;
   const sourceValid = source && ['page', 'line', 'slot'].every(key =>
     typeof source[key] === 'number' && Number.isInteger(source[key]) && Number(source[key]) >= (key === 'slot' ? 0 : 1) && Number(source[key]) <= 100000,
   ) && typeof source.rawText === 'string' && source.rawText.length <= OCR_MAX_SOURCE_LINE
     && typeof source.engine === 'string' && source.engine.length > 0 && source.engine.length <= 200
     && (source.confidence === null || (typeof source.confidence === 'number' && Number.isFinite(source.confidence) && source.confidence >= 0 && source.confidence <= 100))
+    && (source.modelVersion === undefined || (typeof source.modelVersion === 'string' && source.modelVersion.length <= 300))
+    && (source.recognitionMode === undefined || ['printed-baseline', 'handwriting-unsupported', 'manual-transcription'].includes(String(source.recognitionMode)))
+    && (source.crop === undefined || (sourceCrop !== null
+      && [sourceCrop.x, sourceCrop.y, sourceCrop.width, sourceCrop.height].every(value => typeof value === 'number' && Number.isFinite(value))
+      && (sourceCrop.x as number) >= 0 && (sourceCrop.y as number) >= 0 && (sourceCrop.width as number) > 0 && (sourceCrop.height as number) > 0
+      && (sourceCrop.x as number) + (sourceCrop.width as number) <= 1 && (sourceCrop.y as number) + (sourceCrop.height as number) <= 1))
     && (source.contextDate === undefined || isOcrDate(source.contextDate))
     && (source.contextDateOrigin === undefined || ['user', 'page-header'].includes(String(source.contextDateOrigin)));
   if (!sourceValid) errors.push('Invalid source reference.');
@@ -140,6 +147,9 @@ export function validateOcrCandidate(
     notes, approved: value.approved as boolean, source: {
       page: source.page as number, line: source.line as number, slot: source.slot as number,
       rawText: source.rawText as string, engine: source.engine as string, confidence: source.confidence as number | null,
+      ...(source.modelVersion ? { modelVersion: source.modelVersion as string } : {}),
+      ...(source.recognitionMode ? { recognitionMode: source.recognitionMode as OcrCandidate['source']['recognitionMode'] } : {}),
+      ...(source.crop ? { crop: source.crop as OcrCandidate['source']['crop'] } : {}),
       ...(source.contextDate ? { contextDate: source.contextDate as string } : {}),
       ...(source.contextDateOrigin ? { contextDateOrigin: source.contextDateOrigin as 'user' | 'page-header' } : {}),
     },

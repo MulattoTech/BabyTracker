@@ -586,7 +586,17 @@ async function handleGet(req: NextRequest, authContext: AuthResult) {
     }
 
     // CSV format (default)
-    const csvContent = objectArrayToCsv(rows);
+    // CSV quoting does not stop spreadsheet formula execution. Keep imported
+    // and user-authored text inert when it begins with a formula marker,
+    // including after leading whitespace or control characters.
+    const formulaPrefix = /^[\u0000-\u0020\u007f-\u009f]*[=+\-@]/;
+    const safeRows = rows.map(row => Object.fromEntries(
+      Object.entries(row).map(([key, value]) => [
+        key,
+        typeof value === 'string' && formulaPrefix.test(value) ? `'${value}` : value,
+      ])
+    ));
+    const csvContent = objectArrayToCsv(safeRows);
     const filename = `activity-log-${babyName}-${dateStr}.csv`;
 
     return new NextResponse(csvContent, {

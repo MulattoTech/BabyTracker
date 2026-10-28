@@ -88,6 +88,10 @@ describe('OCR care-event drafts', () => {
     expect(row).toMatchObject({ amount, unit, localDate: '2026-04-14' });
   });
 
+  it.each([['1/2 oz', 0.5], ['2 1/2 oz', 2.5]])('does not truncate fractional volume %s', (source, amount) => {
+    expect(parse(`8 AM bottle ${source}`)[0]).toMatchObject({ amount, unit: 'OZ' });
+  });
+
   it('does not choose one of several quantities or treat a decimal comma as a different number', () => {
     expect(parse('8 AM bottle 60 ml + 30 ml')[0].amount).toBeNull();
     expect(parse('8 AM bottle 2 oz (60 ml)')[0].amount).toBeNull();
@@ -119,6 +123,19 @@ describe('OCR care-event drafts', () => {
     expect(parse('8 AM dry')[0].diaperType).toBe('DRY');
   });
 
+  it('does not infer a wet event from negation and keeps wet plus dirty distinct', () => {
+    expect(parse('8 AM no wet diaper')[0]).toMatchObject({ eventType: 'diaper', diaperType: null });
+    expect(parse('8 AM wet and dirty diaper')[0]).toMatchObject({ eventType: 'diaper', diaperType: 'BOTH' });
+  });
+
+  it('separates multiple timed care events found on one source line', () => {
+    const rows = parseOcrPages([{ page: 1, text: '2026-04-14 08:00 bottle formula 2 oz 2026-04-14 09:00 wet diaper' }], { timeFormat: '24h' });
+    expect(rows.map(row => [row.eventType, row.localTime])).toEqual([['feed', '08:00'], ['diaper', '09:00']]);
+    expect(rows.map(row => row.localDate)).toEqual(['2026-04-14', '2026-04-14']);
+    expect(rows.map(row => row.source.line)).toEqual([1, 1]);
+    expect(rows.map(row => row.source.slot)).toEqual([0, 1]);
+  });
+
   it('abstains from crossed-out or negated feeding fields', () => {
     expect(parse('8 AM bottle ~~60 ml~~ 90 ml')[0].amount).toBeNull();
     expect(parse('8 AM no bottle 60 ml')[0].feedType).toBeNull();
@@ -138,6 +155,14 @@ describe('OCR care-event drafts', () => {
     expect(rows[0].approved).toBe(false);
     expect(rows[1].warnings.some(message => message.includes('Low engine'))).toBe(true);
     expect(rows[1].amount).toBeNull();
+  });
+
+  it('keeps normalized row coordinates and recognizer provenance through parsing and validation', () => {
+    const crop = { x: 0.12, y: 0.25, width: 0.63, height: 0.09 };
+    const row = parseOcrPages([{ page: 2, text: '08:15 bottle 90 mL', confidence: 91, engine: 'synthetic browser', modelVersion: 'synthetic-model', recognitionMode: 'printed-baseline', lineCrops: [crop] }])[0];
+    expect(row.source).toMatchObject({ page: 2, line: 1, crop, engine: 'synthetic browser', modelVersion: 'synthetic-model', recognitionMode: 'printed-baseline' });
+    expect(validateOcrCandidate(row, { allowIncomplete: true })).toMatchObject({ valid: true, candidate: { source: { page: 2, line: 1, crop } } });
+    expect(validateOcrCandidate({ ...row, source: { ...row.source, crop: { ...crop, width: 1 } } }, { allowIncomplete: true }).valid).toBe(false);
   });
 
   it('bounds document parsing and rejects duplicate page IDs instead of colliding row identity', () => {

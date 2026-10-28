@@ -85,9 +85,27 @@ beforeEach(() => {
       caretaker: { name: 'Mama' },
     },
   ]);
+  mocks.prisma.note.findMany.mockResolvedValue([]);
 });
 
 describe('timeline export route', () => {
+  it('exports OCR note content as inert text in CSV', async () => {
+    mocks.prisma.note.findMany.mockResolvedValue([
+      {
+        id: 'note-1',
+        babyId: 'baby-1',
+        familyId: 'family-1',
+        time: new Date('2026-08-31T09:00:00.000Z'),
+        content: '=HYPERLINK("https://example.invalid","open")',
+      },
+    ]);
+
+    const response = await GET(exportRequest('csv') as any);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("'=HYPERLINK(\"\"https://example.invalid\"\",\"\"open\"\")");
+  });
+
   it.each([
     ['csv', 'text/csv'],
     ['xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],

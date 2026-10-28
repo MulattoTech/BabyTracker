@@ -34,8 +34,13 @@ export interface RecognizedPage {
   text: string;
   confidence: number | null;
   engine: string;
+  modelVersion?: string;
+  recognitionMode?: 'printed-baseline' | 'handwriting-unsupported' | 'manual-transcription';
+  lineCrops?: readonly ({ readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null)[];
   image: Buffer;
 }
+
+export type SuppliedOcrPage = Omit<RecognizedPage, 'image'>;
 
 async function run(command: string, args: string[], signal?: AbortSignal): Promise<string> {
   try {
@@ -70,8 +75,8 @@ async function verifiedEngine(signal?: AbortSignal): Promise<string> {
   return `${version}; eng-fast sha256:${OCR_MODEL_SHA256}; psm6`;
 }
 
-export function readTesseractTsv(tsv: string): { text: string; confidence: number | null } {
-  const lines = new Map<string, string[]>();
+export function readTesseractTsv(tsv: string, imageSize?: { width: number; height: number }): { text: string; confidence: number | null; lineCrops?: RecognizedPage['lineCrops'] } {
+  const lines = new Map<string, { words: string[]; left: number; top: number; right: number; bottom: number }>();
   const confidences: number[] = [];
   for (const row of tsv.split('\n').slice(1)) {
     const cells = row.split('\t');
@@ -79,21 +84,34 @@ export function readTesseractTsv(tsv: string): { text: string; confidence: numbe
     const word = cells.slice(11).join('\t').trim();
     if (!word) continue;
     const id = cells.slice(1, 5).join('-');
-    if (!lines.has(id)) lines.set(id, []);
-    lines.get(id)!.push(word);
+    const left = Number(cells[6]), top = Number(cells[7]), width = Number(cells[8]), height = Number(cells[9]);
+    if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) continue;
+    if (!lines.has(id)) lines.set(id, { words: [], left, top, right: left + width, bottom: top + height });
+    const line = lines.get(id)!;
+    line.words.push(word); line.left = Math.min(line.left, left); line.top = Math.min(line.top, top);
+    line.right = Math.max(line.right, left + width); line.bottom = Math.max(line.bottom, top + height);
     const confidence = Number(cells[10]);
     if (Number.isFinite(confidence) && confidence >= 0 && confidence <= 100) confidences.push(confidence);
   }
+  const recognizedLines = [...lines.values()];
   return {
-    text: [...lines.values()].map(words => words.join(' ')).join('\n'),
+    text: recognizedLines.map(line => line.words.join(' ')).join('\n'),
     confidence: confidences.length ? confidences.reduce((a, b) => a + b, 0) / confidences.length : null,
+    ...(imageSize ? { lineCrops: recognizedLines.length ? recognizedLines.map(line => {
+      const left = Math.max(0, Math.min(imageSize.width, line.left));
+      const top = Math.max(0, Math.min(imageSize.height, line.top));
+      const right = Math.max(left, Math.min(imageSize.width, line.right));
+      const bottom = Math.max(top, Math.min(imageSize.height, line.bottom));
+      return { x: left / imageSize.width, y: top / imageSize.height,
+        width: (right - left) / imageSize.width, height: (bottom - top) / imageSize.height };
+    }) : [null] } : {}),
   };
 }
 
-export async function recognizeOcrDocument(bytes: Buffer, rotation = 0, signal?: AbortSignal): Promise<RecognizedPage[]> {
+export async function recognizeOcrDocument(bytes: Buffer, rotation = 0, signal?: AbortSignal, supplied?: readonly SuppliedOcrPage[]): Promise<RecognizedPage[]> {
   const mime = identifyOcrUpload(bytes);
   if (![0, 90, 180, 270].includes(rotation)) throw new OcrError('Choose a rotation of 0, 90, 180 or 270 degrees.');
-  const engine = await verifiedEngine(signal);
+  const engine = supplied ? '' : await verifiedEngine(signal);
   const dir = await mkdtemp(path.join(tmpdir(), 'babytracker-ocr-'));
   try {
     let count = 1;
@@ -104,6 +122,9 @@ export async function recognizeOcrDocument(bytes: Buffer, rotation = 0, signal?:
       if (/^Encrypted:\s+yes/im.test(info)) throw new OcrError('Password-protected PDFs are not supported.');
       count = Number(info.match(/^Pages:\s+(\d+)/m)?.[1]);
       if (!Number.isInteger(count) || count < 1 || count > OCR_LIMITS.pages) throw new OcrError('Choose a PDF with 1 to 6 pages.');
+    }
+    if (supplied && (rotation !== 0 || supplied.length !== count || supplied.some((page, index) => page.page !== index + 1))) {
+      throw new OcrError('Browser recognition evidence does not match the source page count or orientation.');
     }
     const pages: RecognizedPage[] = [];
     for (let page = 1; page <= count; page++) {
@@ -130,11 +151,20 @@ export async function recognizeOcrDocument(bytes: Buffer, rotation = 0, signal?:
       // Explicit output flags work with a model-only TESSDATA_PREFIX; a named
       // `tsv` config requires a separate configs/tsv file and can silently fall
       // back to plain text when that file is absent.
-      const tsv = await run('tesseract', [imagePath, 'stdout', '-l', 'eng', '--psm', '6', '-c', 'tessedit_create_tsv=1'], signal);
-      if (!tsv.startsWith('level\tpage_num\tblock_num\t')) throw new OcrError('The local recognition engine returned an unsupported result. No care records were created.', 503);
-      const result = readTesseractTsv(tsv);
+      let result: Omit<RecognizedPage, 'page' | 'image'>;
+      if (supplied) {
+        const evidencePage = supplied[page - 1];
+        result = { text: evidencePage.text, confidence: evidencePage.confidence, engine: evidencePage.engine, modelVersion: evidencePage.modelVersion,
+          recognitionMode: evidencePage.recognitionMode, lineCrops: evidencePage.lineCrops };
+      } else {
+        const tsv = await run('tesseract', [imagePath, 'stdout', '-l', 'eng', '--psm', '6', '-c', 'tessedit_create_tsv=1'], signal);
+        if (!tsv.startsWith('level\tpage_num\tblock_num\t')) throw new OcrError('The local recognition engine returned an unsupported result. No care records were created.', 503);
+        const dimensions = await sharp(image).metadata();
+        result = { ...readTesseractTsv(tsv, { width: dimensions.width || 1, height: dimensions.height || 1 }), engine,
+          modelVersion: engine, recognitionMode: 'printed-baseline' };
+      }
       if (result.text.length > OCR_LIMITS.text) throw new OcrError('Too much text was found. Upload a smaller section.');
-      pages.push({ page, ...result, engine, image });
+      pages.push({ page, ...result, image });
     }
     return pages;
   } finally {

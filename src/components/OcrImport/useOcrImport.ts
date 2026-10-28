@@ -21,8 +21,10 @@ export function useOcrImport(babyId: string | undefined, defaultTimeZone: string
   const [dirty, setDirty] = useState(false);
   const generation = useRef(0);
   const pending = useRef<AbortController | null>(null);
+  const activeBabyId = useRef(babyId);
 
   useEffect(() => {
+    activeBabyId.current = babyId;
     const current = ++generation.current;
     const abort = new AbortController();
     pending.current?.abort(); pending.current = abort;
@@ -103,6 +105,7 @@ export function useOcrImport(babyId: string | undefined, defaultTimeZone: string
   };
   const upload = (form: FormData) => {
     if (dirty && !window.confirm(t('Discard unsaved draft changes and upload another document?'))) return;
+    if (activeBabyId.current !== babyId) { setError('The selected child changed during recognition. Start the upload again.'); return; }
     if (!babyId) return;
     form.set('babyId', babyId);
     return perform('upload', signal => ocrRequest<OcrDocumentView>('', { method: 'POST', body: form, signal }), acceptDocument, 'Draft extracted. Review every selected event before importing.');

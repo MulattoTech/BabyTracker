@@ -17,7 +17,7 @@ interface Props {
   onEdit: (patch: Partial<OcrCandidate>) => void;
   onApprove: (value: boolean) => void;
   onOffset: (key: 'start' | 'end', value: number | undefined) => void;
-  onSource: () => void;
+  onSource: (crop?: OcrCandidate['source']['crop']) => void;
   onSplit: () => void;
   onRemove: () => void;
 }
@@ -41,7 +41,7 @@ export default function RowEditor({ row, number, timeZone, offsets, locked, onEd
   return <article className={`ocr-row${row.approved ? ' ocr-row-approved' : ''}`} aria-label={`${t('Draft event')} ${number}`}>
     <header className="ocr-row-header">
       <div><span className="ocr-row-number">{number}</span><strong>{t('Draft event')}</strong><span className={`ocr-status ${row.approved ? 'ocr-status-ok' : 'ocr-status-review'}`}>{row.approved && <CheckCircle2 size={13} aria-hidden="true" />}{t(status)}</span></div>
-      <Button type="button" size="sm" variant="ghost" onClick={onSource}><FileSearch size={15} aria-hidden="true" />{t('Page')} {row.source.page}</Button>
+      <Button type="button" size="sm" variant="ghost" onClick={() => onSource(row.source.crop)}><FileSearch size={15} aria-hidden="true" />{t('Page')} {row.source.page}</Button>
     </header>
     <fieldset disabled={locked} className="ocr-row-fields">
       <legend className="sr-only">{t('Correct this event')}</legend>
@@ -83,7 +83,9 @@ export default function RowEditor({ row, number, timeZone, offsets, locked, onEd
     </fieldset>
     <details className="ocr-evidence">
       <summary>{t('Recognized text, uncertainty and provenance')}</summary>
-      <p className="ocr-hint">{t('Source page')}: {row.source.page} · {t('Line')}: {row.source.line} · {t('Engine')}: {row.source.engine}</p>
+      <p className="ocr-hint">{t('Source page')}: {row.source.page} · {t('Line')}: {row.source.line} · {t('Engine')}: {row.source.engine}{row.source.modelVersion ? ` · ${t('Model')}: ${row.source.modelVersion}` : ''}</p>
+      {row.source.recognitionMode === 'printed-baseline' && <p className="ocr-hint">{t('Printed text baseline. Handwriting recognition is unsupported; transcribe unclear writing manually.')}</p>}
+      {row.source.crop && <p className="ocr-hint">{t('Source line location')}: {Math.round(row.source.crop.x * 100)}%, {Math.round(row.source.crop.y * 100)}% · {Math.round(row.source.crop.width * 100)}% × {Math.round(row.source.crop.height * 100)}%</p>}
       <p className="ocr-hint">{t('Engine recognition score')}: {row.source.confidence === null ? t('Unavailable') : `${row.source.confidence.toFixed(1)} / 100`} · {t('This is not a field accuracy score.')}</p>
       <pre className="ocr-raw-text">{row.source.rawText || t('Manual transcription — compare with the original page.')}</pre>
       {warnings.length > 0 && <ul className="ocr-warnings">{warnings.map(message => <li key={message}>{t(message)}</li>)}</ul>}

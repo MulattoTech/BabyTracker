@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Download, FileText, ZoomIn, ZoomOut } from 'lucide-react';
 import { Button } from '@/src/components/ui/button';
 import type { OcrDocumentView } from '@/src/lib/ocr/contracts';
+import type { OcrCandidate } from '@/src/lib/ocr/types';
 import { useLocalization } from '@/src/context/localization';
 import { ocrSource } from './api';
 import { ChoiceField } from './Field';
@@ -12,9 +13,10 @@ interface Props {
   onPage: (page: number) => void;
   busy: boolean;
   onPurge: () => void;
+  crop?: OcrCandidate['source']['crop'];
 }
 
-export default function SourcePanel({ document, page, onPage, busy, onPurge }: Props) {
+export default function SourcePanel({ document, page, onPage, busy, onPurge, crop }: Props) {
   const { t } = useLocalization();
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
@@ -56,7 +58,9 @@ export default function SourcePanel({ document, page, onPage, busy, onPurge }: P
     {url && <div className={`ocr-source-image${zoom ? ' ocr-source-zoom' : ''}`} tabIndex={0} aria-label={t('Scrollable source preview')}>
       {/* Authorized blob URLs avoid putting credentials or private document URLs in image requests. */}
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={url} alt={`${t('Source page')} ${page} — ${document.originalName}`} />
+      <span className="ocr-source-canvas"><img src={url} alt={`${t('Source page')} ${page} — ${document.originalName}`} />
+        {crop && <span className="ocr-source-crop" aria-label={t('Recognized line location')} style={{ left: `${crop.x * 100}%`, top: `${crop.y * 100}%`, width: `${crop.width * 100}%`, height: `${crop.height * 100}%` }} />}
+      </span>
     </div>}
     <p className="ocr-hint">{t('Source retention ends')}: {new Date(document.sourceExpiresAt).toLocaleString()}</p>
     {document.hasSource && <div className="ocr-button-row">

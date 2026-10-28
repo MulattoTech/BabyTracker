@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { OcrDocument, Prisma } from '@prisma/client';
-import type { OcrCandidate, OcrEditableField } from './types';
+import type { OcrCandidate, OcrEditableField, OcrPageText } from './types';
 import type { OcrDuplicate, OcrReviewRequest, OcrReviewPreview } from './contracts';
 import type { ExternalImportRecord } from '@/src/types/external-import';
 import { openOcrState } from './crypto';
@@ -10,7 +10,7 @@ import { OcrError } from './errors';
 
 const fields: OcrEditableField[] = ['eventType', 'localDate', 'localTime', 'endLocalDate', 'endLocalTime', 'feedType', 'bottleType', 'amount', 'unit', 'diaperType', 'sleepType', 'notes'];
 export const ocrScope = (document: Pick<OcrDocument, 'id' | 'familyId'>) => `${document.familyId}:${document.id}`;
-export interface OriginalOcrState { rows: OcrCandidate[]; pages: { page: number; text: string; engine: string; confidence: number | null }[] }
+export interface OriginalOcrState { rows: OcrCandidate[]; pages: OcrPageText[] }
 
 export function readReviewRequest(input: unknown, document: OcrDocument): OcrReviewRequest {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OcrError('Invalid review.');

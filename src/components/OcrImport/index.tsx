@@ -7,6 +7,7 @@ import { useTimezone } from '@/app/context/timezone';
 import { useLocalization } from '@/src/context/localization';
 import { Button } from '@/src/components/ui/button';
 import { isOcrDate } from '@/src/lib/ocr/validation';
+import type { OcrCandidate } from '@/src/lib/ocr/types';
 import { useOcrImport } from './useOcrImport';
 import { ChoiceField, TextField } from './Field';
 import UploadPanel from './UploadPanel';
@@ -23,14 +24,15 @@ export default function OcrImport() {
   const [page, setPage] = useState(1);
   const [bulkDate, setBulkDate] = useState('');
   const [showUpload, setShowUpload] = useState(true);
+  const [sourceCrop, setSourceCrop] = useState<OcrCandidate['source']['crop']>();
   const sourceRef = useRef<HTMLDivElement>(null);
   useEffect(() => { setPage(1); setBulkDate(''); if (state.document) setShowUpload(false); }, [state.document?.id]);
   useEffect(() => { setShowUpload(true); }, [selectedBaby?.id]);
   const document = state.document?.babyId === selectedBaby?.id ? state.document : null;
   const locked = Boolean(state.busy || document?.committedAt);
   const selectedCount = state.rows.filter(row => row.approved).length;
-  const viewSource = (nextPage: number) => {
-    setPage(nextPage); sourceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const viewSource = (nextPage: number, crop?: OcrCandidate['source']['crop']) => {
+    setPage(nextPage); setSourceCrop(crop); sourceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
   return <section className="ocr-import" aria-labelledby="ocr-import-title">
     <header className="ocr-hero">
@@ -61,7 +63,7 @@ export default function OcrImport() {
           <span className="ocr-status">{t(document.committedAt ? 'Imported' : state.dirty ? 'Unsaved draft changes' : 'Draft saved')}</span>
         </div>
         <div className="ocr-review-layout">
-          <div ref={sourceRef}><SourcePanel document={document} page={page} onPage={setPage} busy={Boolean(state.busy)} onPurge={state.purge} /></div>
+          <div ref={sourceRef}><SourcePanel document={document} page={page} onPage={value => { setPage(value); setSourceCrop(undefined); }} crop={sourceCrop} busy={Boolean(state.busy)} onPurge={state.purge} /></div>
           <section className="ocr-events" aria-label={t('Editable care events')}>
             {!document.committedAt && <section className="ocr-panel ocr-review-tools">
               <TextField label="Time zone for this document" value={state.timeZone} onChange={state.changeTimeZone} disabled={locked} />
@@ -75,7 +77,7 @@ export default function OcrImport() {
             {state.rows.length === 0 && <section className="ocr-panel ocr-empty"><h3>{t('No events recognized yet')}</h3><p>{t('Keep the source open and add events manually. Unreadable handwriting never becomes a guessed care record.')}</p></section>}
             {state.rows.map((row, index) => <RowEditor key={row.id} row={row} number={index + 1} timeZone={state.timeZone} offsets={state.utcOffsets[row.id]} locked={locked}
               onEdit={patch => state.edit(row.id, patch)} onApprove={approved => state.approve(row.id, approved)}
-              onOffset={(key, value) => state.setOffset(row.id, key, value)} onSource={() => viewSource(row.source.page)}
+              onOffset={(key, value) => state.setOffset(row.id, key, value)} onSource={crop => viewSource(row.source.page, crop)}
               onSplit={() => { if (state.rows.length < 200) state.add(row.source.page, row); }} onRemove={() => state.remove(row.id)} />)}
           </section>
         </div>

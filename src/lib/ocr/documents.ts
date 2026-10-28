@@ -6,6 +6,8 @@ import { parseOcrPages } from './parser';
 import { isOcrDate } from './validation';
 import { OCR_LIMITS, acquireOcrSlot, identifyOcrUpload, recognizeOcrDocument } from './intake';
 import { OCR_PARSER_VERSION } from './types';
+import { parseBrowserOcrEvidence } from './adapter';
+import { unpackBrowserOcrEnvelope } from './envelope';
 import { openOcrState, sealOcrState } from './crypto';
 import { OcrError } from './errors';
 import { findOcrDuplicates, ocrScope, OriginalOcrState, readReviewRequest, reviewHash, reviewIssues, toSproutRecords } from './review';
@@ -43,14 +45,17 @@ export async function createOcrDocument(db: PrismaClient, actor: OcrActor, input
   timeFormat: '24h' | '12h' | 'unknown'; rotation: number; retentionDays: number;
   signal?: AbortSignal;
 }): Promise<OcrDocumentView> {
+  const envelope = unpackBrowserOcrEnvelope(input.bytes);
+  const sourceBytes = envelope ? Buffer.from(envelope.sourceBytes) : input.bytes;
+  const recognitionEvidence = envelope?.evidence;
   const baby = await db.baby.findFirst({ where: { id: input.babyId, familyId: actor.familyId, deletedAt: null, inactive: false }, select: { id: true } });
   if (!baby) throw new OcrError('Select a baby in this family.', 404);
   if (input.defaultDate && !isOcrDate(input.defaultDate)) throw new OcrError('Enter a complete source date or leave it blank.');
   try { new Intl.DateTimeFormat('en', { timeZone: input.timeZone }); } catch { throw new OcrError('Choose a valid time zone.'); }
   if (!input.timeZone || !['24h', '12h', 'unknown'].includes(input.timeFormat)) throw new OcrError('Choose the document time zone and clock format.');
   if (!Number.isInteger(input.retentionDays) || input.retentionDays < 1 || input.retentionDays > 365) throw new OcrError('Source retention must be between 1 and 365 days.');
-  const mimeType = identifyOcrUpload(input.bytes);
-  const sourceHash = createHash('sha256').update(input.bytes).digest('hex');
+  const mimeType = identifyOcrUpload(sourceBytes);
+  const sourceHash = createHash('sha256').update(sourceBytes).digest('hex');
   const unique = { familyId: actor.familyId, babyId: baby.id, sourceHash };
   const existing = await db.ocrDocument.findUnique({ where: { familyId_babyId_sourceHash: unique } });
   if (existing) return ocrDocumentView(existing);
@@ -59,7 +64,8 @@ export async function createOcrDocument(db: PrismaClient, actor: OcrActor, input
   const release = acquireOcrSlot(actor.familyId);
   const stored: string[] = [];
   try {
-    const pages = await recognizeOcrDocument(input.bytes, input.rotation, input.signal);
+    const evidence = recognitionEvidence === undefined ? undefined : parseBrowserOcrEvidence(recognitionEvidence, sourceBytes);
+    const pages = await recognizeOcrDocument(sourceBytes, input.rotation, input.signal, evidence?.pages);
     const rows = parseOcrPages(pages, { defaultDate: input.defaultDate, timeFormat: input.timeFormat });
     if (rows.length > OCR_LIMITS.rows) throw new OcrError('More than 200 events were found. Upload a smaller section.');
     if (input.signal?.aborted) throw new OcrError('Recognition cancelled. No care records were created.', 499);
@@ -69,7 +75,7 @@ export async function createOcrDocument(db: PrismaClient, actor: OcrActor, input
       const name = generateStoredName();
       encryptAndStore(bytes, name, storageDir); stored.push(name); return name;
     };
-    const sourceFile = store(input.bytes);
+    const sourceFile = store(sourceBytes);
     const previews = pages.map(page => ({ page: page.page, file: store(page.image) }));
     const originalState = sealOcrState({
       rows, pages: pages.map(({ image: _image, ...page }) => page),
@@ -78,7 +84,7 @@ export async function createOcrDocument(db: PrismaClient, actor: OcrActor, input
     const review: OcrReviewRequest = { rows, revision: 0, timeZone: input.timeZone, utcOffsets: {}, duplicateDecisions: {} };
     const document = await db.ocrDocument.create({ data: {
       id, ...unique, originalName: input.name.replace(/[\x00-\x1f\x7f/\\]/g, '_').slice(0, 180) || 'document',
-      mimeType, byteSize: input.bytes.length, sourceFile, previewFiles: JSON.stringify(previews), pageCount: pages.length,
+      mimeType, byteSize: sourceBytes.length, sourceFile, previewFiles: JSON.stringify(previews), pageCount: pages.length,
       parserVersion: OCR_PARSER_VERSION, sourceTimezone: input.timeZone, originalState,
       reviewState: sealOcrState(review, scope(reference, 'review')),
       sourceExpiresAt: new Date(Date.now() + input.retentionDays * 86_400_000),

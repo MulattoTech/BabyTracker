@@ -87,6 +87,23 @@ function segmentsIn(text: string): string[] {
   return segments;
 }
 
+function splitTimedEvents(text: string, mode: OcrParseOptions['timeFormat']): string[] {
+  const clocks = clocksIn(text, mode);
+  if (clocks.length < 2 || typesIn(text).includes('sleep')) return [text];
+  const chunks = clocks.map((clock, index) => text.slice(clock.index, clocks[index + 1]?.index ?? text.length).trim());
+  if (chunks.some(chunk => typesIn(chunk).length === 0)) return [text];
+  const dates = datesIn(text);
+  const prefix = text.slice(0, clocks[0].index).trim();
+  return chunks.map((chunk, index) => {
+    if (index === 0 && prefix) return `${prefix} ${chunk}`;
+    const priorEnd = clocks[index - 1].index + clocks[index - 1].raw.length;
+    const interstitialDates = datesIn(text.slice(priorEnd, clocks[index].index));
+    if (interstitialDates.length) return `${interstitialDates.map(date => date.raw).join(' ')} ${chunk}`;
+    if (!datesIn(chunk).length && dates.length === 1) return `${dates[0].raw} ${chunk}`;
+    return chunk;
+  });
+}
+
 function makeCandidate(
   page: OcrPageText, lineNumber: number, rawText: string, segment: string,
   eventType: OcrEventType, slot: number, contextDate: string | null,
@@ -199,6 +216,9 @@ function makeCandidate(
     source: {
       page: page.page, line: lineNumber, slot, rawText, engine: page.engine || OCR_PARSER_VERSION,
       confidence: page.confidence ?? null,
+      ...(page.lineCrops?.[lineNumber - 1] ? { crop: page.lineCrops[lineNumber - 1]! } : {}),
+      ...(page.modelVersion ? { modelVersion: page.modelVersion } : {}),
+      ...(page.recognitionMode ? { recognitionMode: page.recognitionMode } : {}),
       ...(contextDate ? { contextDate, contextDateOrigin } : {}),
     }, fieldSources, warnings,
   };
@@ -215,6 +235,11 @@ export function parseOcrPages(pages: readonly OcrPageText[], options: OcrParseOp
     if (!Number.isInteger(page.page) || page.page < 1 || page.page > 10000 || pageIds.has(page.page)
       || typeof page.text !== 'string' || page.text.length > 200000
       || (page.engine !== undefined && (typeof page.engine !== 'string' || page.engine.length > 200))
+      || (page.modelVersion !== undefined && (typeof page.modelVersion !== 'string' || page.modelVersion.length > 300))
+      || (page.recognitionMode !== undefined && !['printed-baseline', 'handwriting-unsupported', 'manual-transcription'].includes(page.recognitionMode))
+      || (page.lineCrops !== undefined && (!Array.isArray(page.lineCrops) || page.lineCrops.length !== page.text.replace(/\r\n?/g, '\n').split('\n').length || page.lineCrops.length > 500
+        || page.lineCrops.some(crop => crop !== null && (!crop || ![crop.x, crop.y, crop.width, crop.height].every(Number.isFinite)
+          || crop.x < 0 || crop.y < 0 || crop.width <= 0 || crop.height <= 0 || crop.x + crop.width > 1 || crop.y + crop.height > 1))))
       || (page.confidence !== undefined && page.confidence !== null && (!Number.isFinite(page.confidence) || page.confidence < 0 || page.confidence > 100))) {
       throw new Error('Invalid or oversized OCR page.');
     }
@@ -241,11 +266,13 @@ export function parseOcrPages(pages: readonly OcrPageText[], options: OcrParseOp
         && /\b(?:date|time|amount|unit|notes)\b/i.test(rawText)
         && /^(?:[\s|,:/-]|date|time|feeding|feed|bottle|amount|unit|diaper|wet|dirty|sleep|notes|milk|ml|oz)+$/i.test(rawText)) continue;
       let slot = 0;
-      for (const segment of segmentsIn(rawText)) {
-        const types = typesIn(segment);
-        for (const eventType of types.length ? types : ['unknown'] as const) {
-          candidates.push(makeCandidate(page, index + 1, rawText, segment, eventType, slot++, contextDate, contextDateOrigin, options.timeFormat));
-          if (candidates.length > OCR_MAX_CANDIDATES) throw new Error(`At most ${OCR_MAX_CANDIDATES} draft events are supported per document.`);
+      for (const timedSegment of splitTimedEvents(rawText, options.timeFormat)) {
+        for (const segment of segmentsIn(timedSegment)) {
+          const types = typesIn(segment);
+          for (const eventType of types.length ? types : ['unknown'] as const) {
+            candidates.push(makeCandidate(page, index + 1, rawText, segment, eventType, slot++, contextDate, contextDateOrigin, options.timeFormat));
+            if (candidates.length > OCR_MAX_CANDIDATES) throw new Error(`At most ${OCR_MAX_CANDIDATES} draft events are supported per document.`);
+          }
         }
       }
     }

@@ -39,6 +39,8 @@
 .ocr-source-controls > .ocr-field { flex: 1; }
 .ocr-source-image { background: #edf2f4; border: 1px solid #dce4e9; border-radius: 10px; overflow: auto; max-height: 60vh; min-height: 120px; }
 .ocr-source-image img { display: block; width: 100%; height: auto; }
+.ocr-source-canvas { display: block; position: relative; width: 100%; }
+.ocr-source-crop { position: absolute; border: 2px solid #f59e0b; background: #f59e0b22; pointer-events: none; }
 .ocr-source-zoom img { width: 160%; max-width: none; }
 .ocr-source > .ocr-hint { margin: 12px 0; }
 .ocr-filename { overflow-wrap: anywhere; }

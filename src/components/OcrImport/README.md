@@ -6,7 +6,7 @@ are fetched with an authorization header and rendered from temporary blob URLs.
 
 ## Workflow
 
-1. Choose a child, upload a supported image/PDF, and explicitly choose source date/clock/timezone context.
+1. Choose a child, upload a supported image/PDF, choose server-side or browser-local printed-text recognition, and explicitly choose source date/clock/timezone context. Browser recognition sends bounded recognized text and normalized line locations with the original file to the authenticated OCR endpoint; no third-party service receives them.
 2. Compare the original page with editable feeding, diaper and sleep drafts. Unknown handwriting can be manually transcribed.
 3. Check individual approved rows or explicitly bulk-approve valid rows after review. Edits and timezone changes clear approval.
 4. Save incomplete drafts without creating events. Preview approved rows against existing care records.
@@ -28,5 +28,5 @@ and audit history. No drafts or source images are persisted to browser storage b
 - `ReviewActions.tsx`: selected-row preview, duplicate choices and final confirmation.
 - `review-helpers.ts`: pure draft updates and validation helpers.
 
-The English printed-text baseline is stated explicitly. Engine scores are not field correctness probabilities.
+The English printed-text baseline is stated explicitly. Handwriting recognition is unsupported; unclear entries remain unknown until manually transcribed. Engine scores are not field correctness probabilities. Both recognition modes create only encrypted canonical OCR drafts; only the audited explicit confirmation endpoint writes care events.
 Translation keys for the feature are collected in `translation-keys.json` for integration with the existing localization files.
