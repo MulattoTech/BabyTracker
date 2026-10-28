@@ -1,0 +1,65 @@
+diff --git a/app/api/ocr/documents/route.ts b/app/api/ocr/documents/route.ts
+index f31e8588..3825b4f3 100644
+--- a/app/api/ocr/documents/route.ts
++++ b/app/api/ocr/documents/route.ts
+@@ -28,7 +28,7 @@ export const GET = ocrRoute(async (request, actor) => {
+ });
+ 
+ export const POST = ocrRoute(async (request, actor) => {
+-  const bytes = await readOcrBody(request, OCR_LIMITS.bytes + 64 * 1024);
++  const bytes = await readOcrBody(request, OCR_LIMITS.bytes + 640 * 1024);
+   let form: FormData;
+   try {
+     form = await new Response(new Uint8Array(bytes), { headers: { 'Content-Type': request.headers.get('content-type') || '' } }).formData();
+@@ -40,11 +40,18 @@ export const POST = ocrRoute(async (request, actor) => {
+     if (typeof value !== 'string' || value.length > max) throw new OcrError(`Invalid ${name}.`);
+     return value;
+   };
++  const evidenceField = form.get('recognitionEvidence');
++  let recognitionEvidence: unknown;
++  if (evidenceField !== null) {
++    if (typeof evidenceField !== 'string' || evidenceField.length > 512_000) throw new OcrError('Browser OCR evidence exceeds the document limits.');
++    try { recognitionEvidence = JSON.parse(evidenceField); } catch { throw new OcrError('Browser OCR evidence is invalid.'); }
++  }
++  if (recognitionEvidence !== undefined && Number(text('rotation', 3)) !== 0) throw new OcrError('Browser OCR does not support additional rotation; choose server recognition or rotate the source first.');
+   const result = await createOcrDocument(prisma, actor, {
+     bytes: Buffer.from(await file.arrayBuffer()), name: file.name, babyId: text('babyId'),
+     timeZone: text('timeZone'), defaultDate: text('defaultDate', 10) || undefined,
+     timeFormat: text('timeFormat', 10) as '24h' | '12h' | 'unknown', rotation: Number(text('rotation', 3)),
+-    retentionDays: Number(text('retentionDays', 3)), signal: request.signal,
++    retentionDays: Number(text('retentionDays', 3)), recognitionEvidence, signal: request.signal,
+   });
+   return NextResponse.json({ success: true, data: result });
+ });
+diff --git a/src/lib/ocr/adapter.ts b/src/lib/ocr/adapter.ts
+index 4b92eb9b..6960ac12 100644
+--- a/src/lib/ocr/adapter.ts
++++ b/src/lib/ocr/adapter.ts
+@@ -5,7 +5,13 @@ import { OCR_LIMITS } from './intake';
+ 
+ export interface BrowserOcrEvidence {
+   readonly sourceHash: string;
+-  readonly pages: readonly (OcrPageText & { readonly modelVersion: string; readonly recognitionMode: 'printed-baseline' })[];
++  readonly pages: readonly (Omit<OcrPageText, 'confidence' | 'engine' | 'modelVersion' | 'recognitionMode' | 'lineCrops'> & {
++    readonly confidence: number | null;
++    readonly engine: string;
++    readonly modelVersion: string;
++    readonly recognitionMode: 'printed-baseline';
++    readonly lineCrops: NonNullable<OcrPageText['lineCrops']>;
++  })[];
+ }
+ 
+ export function parseBrowserOcrEvidence(value: unknown, source: Buffer): BrowserOcrEvidence {
+diff --git a/src/lib/ocr/parser.ts b/src/lib/ocr/parser.ts
+index 8b01efdd..f2361725 100644
+--- a/src/lib/ocr/parser.ts
++++ b/src/lib/ocr/parser.ts
+@@ -238,7 +238,7 @@ export function parseOcrPages(pages: readonly OcrPageText[], options: OcrParseOp
+       || (page.modelVersion !== undefined && (typeof page.modelVersion !== 'string' || page.modelVersion.length > 300))
+       || (page.recognitionMode !== undefined && !['printed-baseline', 'handwriting-unsupported', 'manual-transcription'].includes(page.recognitionMode))
+       || (page.lineCrops !== undefined && (!Array.isArray(page.lineCrops) || page.lineCrops.length !== page.text.replace(/\r\n?/g, '\n').split('\n').length || page.lineCrops.length > 500
+-        || page.lineCrops.some(crop => crop !== null && (!crop || ![crop.x, crop.y, crop.width, crop.height].every(Number.isFinite)
++        || page.lineCrops.some((crop: NonNullable<OcrPageText['lineCrops']>[number]) => crop !== null && (!crop || ![crop.x, crop.y, crop.width, crop.height].every(Number.isFinite)
+           || crop.x < 0 || crop.y < 0 || crop.width <= 0 || crop.height <= 0 || crop.x + crop.width > 1 || crop.y + crop.height > 1))))
+       || (page.confidence !== undefined && page.confidence !== null && (!Number.isFinite(page.confidence) || page.confidence < 0 || page.confidence > 100))) {
+       throw new Error('Invalid or oversized OCR page.');
