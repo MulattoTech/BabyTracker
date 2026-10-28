@@ -3,7 +3,7 @@
 name: babytracker-ocr-staging
 services:
   app:
-    image: babytracker-app:ocr-staging
+    image: ${BABYTRACKER_STAGING_IMAGE:-babytracker:ocr-staging}
     build:
       context: .
       args:
