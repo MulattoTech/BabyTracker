@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-let token = null, snapshot = null, refreshing = false, providers = [], limitsLoaded = false, quotaDirty = false, quotaSaving = false;
+let token = null, snapshot = null, refreshing = false, providers = [], limitsLoaded = false, quotaDirty = false, quotaSaving = false, concurrencyDirty = false, concurrencySaving = false;
 function toast(message, error = false) { const node = document.createElement('div'); node.className = 'toast' + (error ? ' error' : ''); node.textContent = message; $('toastRoot').append(node); setTimeout(() => node.remove(), 9000); }
 async function get(url) { const r = await fetch(url, { signal: AbortSignal.timeout(7000) }); const value = await r.json(); if (!r.ok) throw Error(value.error || 'Request failed'); return value; }
 async function action(action, extra = {}) {
@@ -19,6 +19,7 @@ async function action(action, extra = {}) {
 }
 function render(s) {
   snapshot = s;
+  renderCapacity(s);
   const qp=s.quotaPolicy;
   if(qp){
     $('quotaPolicyPanel').classList.toggle('blocked',qp.blocked);
@@ -39,15 +40,23 @@ function render(s) {
   $('mode').textContent = s.mode.toUpperCase(); $('sync').textContent = 'Observed ' + new Date(s.observedAt).toLocaleTimeString();
   $('total').textContent = s.runtime.online ? s.summary.total : '—'; $('working').textContent = s.runtime.online ? s.summary.working : '—'; $('available').textContent = s.runtime.online ? s.summary.available : '—';
   $('quota').textContent = s.quota.fresh ? s.quota.remainingPercent + '%' : '—'; $('quotaNote').textContent = s.quota.fresh ? 'Shared account · current sample' : s.quota.reason;
-  $('notice').textContent = !s.runtime.online ? s.runtime.reason + '. No live activity is being claimed.' : s.emergency ? 'Emergency stop: ' + s.emergency.phase + '. Remaining sessions: ' + (s.emergency.remaining ?? 'unverified') : (s.dispatchBlocker || s.codexDispatchBlocker) || 'Bounded dispatch is enabled. The queue and run budget govern new assignments.';
-  $('notice').classList.toggle('warning', !s.runtime.online || !!s.dispatchBlocker || !!s.codexDispatchBlocker || !!s.emergency);
+  $('notice').textContent = !s.runtime.online ? s.runtime.reason + '. No live activity is being claimed.' : s.emergency ? 'Emergency stop: ' + s.emergency.phase + '. Remaining sessions: ' + (s.emergency.remaining ?? 'unverified') : (s.dispatchBlocker || s.codexDispatchBlocker || (s.capacity?.full ? s.capacity.reason : null)) || 'Bounded dispatch is enabled. The queue and run budget govern new assignments.';
+  $('notice').classList.toggle('warning', !s.runtime.online || !!s.dispatchBlocker || !!s.codexDispatchBlocker || !!s.emergency || !!s.capacity?.full);
   $('resources').textContent = 'Free RAM: ' + s.resources.freeMemoryGiB.toFixed(1) + ' / ' + s.resources.totalMemoryGiB.toFixed(1) + ' GiB · CPU: ' + (s.resources.cpuPercent === null ? 'unavailable' : s.resources.cpuPercent + '%') + ' · Disk I/O: unavailable · Run dispatches: ' + (s.run?.dispatches ?? 0) + ' / ' + s.limits.maxDispatches;
   $('turbo').textContent = s.run?.turbo ? 'Disable Turbo' : 'Enable Turbo';
   $('reconcileAgent').hidden = !['pending', 'uncertain'].includes(s.provisioning?.status);
   const agy = s.agyUsage || {};
   $('agyInfo').textContent = agy.fresh && agy.remainingPercent !== null ? 'Google AGY remaining: ' + agy.remainingPercent + '% (observed, not automatically polled; no verified auto cutoff)' : 'Google AGY quota unknown/stale. AGY may be dispatched manually only with a separate confirmation; no automatic percentage cutoff.';
-  $('rows').innerHTML = s.sessions.length ? s.sessions.map(a => '<tr><td><strong>' + esc(a.name) + '</strong><div class="subtext">' + esc(a.id) + '</div>' + (s.plans?.[a.id] ? '<div class="subtext">' + (s.plans[a.id].status === 'applied_next_turn' ? 'Next turn: ' : s.plans[a.id].status === 'staged' ? 'Saved preference (not applied): ' : 'Model change ' + esc(s.plans[a.id].status.replace(/_/g, ' ')) + ': ') + esc(s.plans[a.id].harness) + ' ' + esc(s.plans[a.id].model) + (s.plans[a.id].status === 'staged' ? ' (NOT applied)' : '') + '</div>' : '') + '</td><td>' + esc(a.model) + '<div class="subtext">' + esc(a.harness) + (a.effort ? ' · ' + esc(a.effort) : '') + '</div></td><td><span class="state-chip ' + (a.busy ? 'active' : a.label === 'Blocked' ? 'blocked' : '') + '">' + esc(a.label) + '</span></td><td>' + (a.issue ? '<a href="https://github.com/MulattoTech/BabyTracker/issues/' + Number(a.issue) + '">Issue #' + Number(a.issue) + '</a>' : 'No reserved task') + '<div class="subtext">' + a.prs.map(p => 'PR #' + Number(p.number) + ' · ' + esc(p.ci || p.state || 'unknown')).join(', ') + '</div></td><td>' + (a.unresolvedDelivery ? 'Manual reconciliation needed' : a.cooldownSeconds ? a.cooldownSeconds + 's cooldown' : 'No reliable ETA') + '</td><td><div class="row-actions"><button class="small-action" data-session="' + esc(a.id) + '" data-op="nudge">Nudge</button><button class="small-action accent" data-session="' + esc(a.id) + '" data-op="find-work">Find Work</button><button class="small-action" data-session="' + esc(a.id) + '" data-op="plan">Change model</button>' + (s.plans?.[a.id]?.status === 'queued' ? '<button class="small-action" data-session="' + esc(a.id) + '" data-op="model-cancel">Cancel change</button>' : '') + (['unverified','reconcile_required'].includes(s.plans?.[a.id]?.status) ? '<button class="small-action" data-session="' + esc(a.id) + '" data-op="model-reconcile">Verify change</button>' : '') + (s.plans?.[a.id]?.status === 'resume_required' ? '<button class="small-action" data-session="' + esc(a.id) + '" data-op="model-resume">Resume change</button>' : '') + '</div></td></tr>').join('') : '<tr><td colspan="6" class="empty">' + (s.runtime.online ? 'No BabyTracker sessions are registered. MJobs agents are excluded. Click Start Fleet to provision one verified BabyTracker Codex orchestrator. No worker is created merely by opening this dashboard.' : 'Orchestrator runtime is unavailable. The local controller and saved task queue remain accessible.') + '</td></tr>';
+  $('rows').innerHTML = s.sessions.length ? s.sessions.map(a => '<tr><td><strong>' + esc(a.name) + '</strong><div class="subtext">' + esc(a.id) + '</div>' + (s.plans?.[a.id] ? '<div class="subtext">' + (s.plans[a.id].status === 'applied_next_turn' ? 'Next turn: ' : s.plans[a.id].status === 'staged' ? 'UNAPPLIED preference only: ' : 'Model change ' + esc(s.plans[a.id].status.replace(/_/g, ' ')) + ': ') + esc(s.plans[a.id].harness) + ' ' + esc(s.plans[a.id].model) + (s.plans[a.id].status === 'staged' ? ' (NOT applied)' : '') + '</div>' : '') + '</td><td><strong>' + esc(a.harness === 'codex' ? 'Codex' : a.harness === 'agy' ? 'AGY / Gemini' : a.harness) + '</strong><div>' + esc(a.model === 'unknown' ? 'Native default (model unreported)' : a.model) + '</div><div class="subtext">' + esc(a.harness) + (a.effort ? ' · ' + esc(a.effort) : '') + '</div></td><td><span class="state-chip ' + (a.busy ? 'active' : a.label === 'Blocked' ? 'blocked' : '') + '">' + esc(a.label) + '</span></td><td>' + (a.issue ? '<a href="https://github.com/MulattoTech/BabyTracker/issues/' + Number(a.issue) + '">Issue #' + Number(a.issue) + '</a>' : 'No reserved task') + '<div class="subtext">' + a.prs.map(p => 'PR #' + Number(p.number) + ' · ' + esc(p.ci || p.state || 'unknown')).join(', ') + '</div></td><td>' + (a.unresolvedDelivery ? 'Manual reconciliation needed' : a.cooldownSeconds ? a.cooldownSeconds + 's cooldown' : 'No reliable ETA') + '</td><td><div class="row-actions"><button class="small-action" data-session="' + esc(a.id) + '" data-op="nudge">Nudge</button><button class="small-action accent" data-session="' + esc(a.id) + '" data-op="find-work">Find Work</button><button class="small-action" data-session="' + esc(a.id) + '" data-op="plan">Change model</button>' + (s.plans?.[a.id]?.status === 'queued' ? '<button class="small-action" data-session="' + esc(a.id) + '" data-op="model-cancel">Cancel change</button>' : '') + (['unverified','reconcile_required'].includes(s.plans?.[a.id]?.status) ? '<button class="small-action" data-session="' + esc(a.id) + '" data-op="model-reconcile">Verify change</button>' : '') + (s.plans?.[a.id]?.status === 'resume_required' ? '<button class="small-action" data-session="' + esc(a.id) + '" data-op="model-resume">Resume change</button>' : '') + '</div></td></tr>').join('') : '<tr><td colspan="6" class="empty">' + (s.runtime.online ? 'No BabyTracker sessions are registered. MJobs agents are excluded. Click Start Fleet to provision one verified BabyTracker Codex orchestrator. No worker is created merely by opening this dashboard.' : 'Orchestrator runtime is unavailable. The local controller and saved task queue remain accessible.') + '</td></tr>';
   $('tasks').innerHTML = s.tasks.length ? s.tasks.map(t => '<div class="task-item"><div><strong>' + esc(t.priority) + ' · ' + esc(t.title) + '</strong><p><a href="https://github.com/MulattoTech/BabyTracker/issues/' + Number(t.issue) + '">Requirement #' + Number(t.issue) + '</a> · ' + esc(t.status) + ' · Acceptance: ' + esc(t.acceptance) + '</p><p>' + esc(t.files.join(', ')) + '</p></div>' + (['proposed', 'queued'].includes(t.status) ? '<div><select aria-label="Assign worker" data-task="' + esc(t.id) + '"><option value="">Choose available worker</option>' + s.sessions.filter(a => a.idle).map(a => '<option value="' + esc(a.id) + '"' + (a.id === t.agentId ? ' selected' : '') + '>' + esc(a.name) + '</option>').join('') + '</select></div>' : '') + '</div>').join('') : '<div class="empty">No assigned tasks. Add a real GitHub issue with a bounded scope to propose the next useful change.</div>';
+  for (const button of $('rows').querySelectorAll('button[data-op="find-work"],button[data-op="nudge"]')) {
+    const agent = s.sessions.find(a => a.id === button.dataset.session);
+    button.disabled = !agent?.canDispatch;
+    button.title = agent?.reason || 'Live dispatch eligibility unavailable';
+  }
+  const allHands = document.querySelector('[data-action="all-hands"]');
+  allHands.disabled = s.mode !== 'running' || !s.runtime.online || !s.sessions.some(a => a.harness === 'codex' && a.canDispatch);
+  allHands.title = s.capacity?.full ? s.capacity.reason : 'Dispatch eligible idle Codex agents; Google AGY requires individual confirmation';
   if (!limitsLoaded) { for (const [key, value] of Object.entries(s.limits)) $('limitsForm').elements[key].value = value; limitsLoaded = true; }
 }
 async function refresh() {
@@ -171,4 +180,26 @@ $('createAgent').addEventListener('click', async () => {
   catch {} finally { $('createAgent').disabled = false; }
 });
 $('reconcileAgent').addEventListener('click', () => { if (confirm('Check AO twice for the previous agent. If no BabyTracker session exists and at least 30 seconds passed, record the rejected attempt and allow a new spawn? This does not launch an agent.')) action('reconcile-agent', { confirmNoSession: true }).catch(() => {}); });
+
+function renderCapacity(s) {
+  const c = s.capacity;
+  if (!c) return;
+  $('capacityPanel').classList.toggle('warning', !c.online || c.full);
+  $('capacityState').textContent = c.online ? 'Parallel work: ' + c.used + ' / ' + c.limit + ' slots occupied' : 'Parallel work: state unavailable';
+  $('capacityReason').textContent = c.reason + (c.online ? ' Running: ' + c.executing + '; settling submissions: ' + c.pending + '; unresolved deliveries: ' + c.unresolved + '.' : '');
+  $('capacityOwners').innerHTML = c.online ? c.slots.map(x => '<div class="capacity-owner"><strong>' + esc(x.id) + ' / ' + esc(x.harness) + '</strong><span>' + esc(x.name) + ' (' + esc(x.role) + ')</span><small>' + esc(x.reason) + (x.holdSeconds ? ' / up to ' + x.holdSeconds + 's cooldown' : '') + '</small></div>').join('') || '<p>No occupied slots observed.</p>' : '<p>No agents are being claimed idle while the runtime is unreachable.</p>';
+  if (!concurrencyDirty) $('concurrencyLimit').value = c.limit;
+  $('concurrencySave').disabled = concurrencySaving || ['emergency','draining'].includes(s.mode);
+}
+$('concurrencyLimit').addEventListener('input', () => { concurrencyDirty = true; $('concurrencyFeedback').textContent = 'UNSAVED parallel-turn limit. Saving does not send work, stop turns, or change quota protection.'; });
+$('concurrencySave').addEventListener('click', async () => {
+  if (concurrencySaving) return;
+  const value = Number($('concurrencyLimit').value);
+  if (!Number.isInteger(value) || value < 1 || value > 32) return toast('Parallel-turn limit must be 1 to 32.', true);
+  if (value > snapshot.limits.concurrency && !confirm('Raise the shared BabyTracker parallel-turn limit from ' + snapshot.limits.concurrency + ' to ' + value + '? Existing automatic scheduling may use the extra slots. Resource and provider usage can increase. The 7% quota safeguard is not changed.')) return;
+  concurrencySaving = true; $('concurrencySave').disabled = true;
+  try { const result = await action('concurrency-policy', { concurrency: value }); concurrencyDirty = false; limitsLoaded = false; $('concurrencyFeedback').textContent = result.note; await refresh(); }
+  catch {} finally { concurrencySaving = false; if (snapshot) renderCapacity(snapshot); }
+});
+
 refresh(); setInterval(refresh, 8000);
