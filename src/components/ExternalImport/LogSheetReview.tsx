@@ -74,6 +74,7 @@ export default function LogSheetReview({ rows, pages, babies, babyId, timezone, 
       ...row,
       id: `${row.documentHash.slice(0, 24)}-p${row.page}-l${nextLine}`,
       line: nextLine,
+      eventIndex: 0,
       rawText: parts.slice(1).join(' '),
       confidence: Math.min(row.confidence, 50),
       reviewed: false,
@@ -99,6 +100,7 @@ export default function LogSheetReview({ rows, pages, babies, babyId, timezone, 
       fileName: page.fileName,
       page: page.page,
       line,
+      eventIndex: 0,
       rawText: '',
       confidence: 100,
       selected: true,
@@ -126,7 +128,11 @@ export default function LogSheetReview({ rows, pages, babies, babyId, timezone, 
       <section className="grid gap-4 rounded-lg border border-slate-600 p-4 sm:grid-cols-2">
         <div>
           <Label htmlFor="log-sheet-baby">{t('Baby')}</Label>
-          <select id="log-sheet-baby" className="mt-1 w-full rounded-md border border-slate-500 bg-slate-900 p-2 text-slate-100" value={babyId} onChange={event => onBabyChange(event.target.value)}>
+          <select id="log-sheet-baby" className="mt-1 w-full rounded-md border border-slate-500 bg-slate-900 p-2 text-slate-100" value={babyId} onChange={event => {
+            const nextBabyId = event.target.value;
+            if (nextBabyId !== babyId) onRowsChange(rows.map(row => ({ ...row, reviewed: false })));
+            onBabyChange(nextBabyId);
+          }}>
             <option value="">{t('Choose a baby')}</option>
             {babies.map(baby => <option key={baby.id} value={baby.id}>{`${baby.firstName} ${baby.lastName}`.trim()}</option>)}
           </select>

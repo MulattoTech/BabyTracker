@@ -6,6 +6,8 @@ export interface LogSheetCandidate {
   readonly fileName: string;
   readonly page: number;
   readonly line: number;
+  /** Zero-based event slot when one OCR line contains multiple timed events. */
+  readonly eventIndex: number;
   readonly rawText: string;
   readonly confidence: number;
   readonly selected: boolean;

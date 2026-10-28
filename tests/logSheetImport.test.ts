@@ -44,6 +44,46 @@ describe('handwritten log import', () => {
     expect(rows[1]).toMatchObject({ eventKind: 'diaper', time: '21:15', diaperType: 'WET' });
   });
 
+  it.each(['1/2 oz', '2 1/2 oz'])('does not truncate fractional volume %s into an integer amount', volume => {
+    const candidate = candidateFromOcrLine({
+      documentHash: hash, fileName: 'fraction-synthetic.png', page: 1, line: 1,
+      text: `2026-10-27 08:10 AM bottle formula ${volume}`, confidence: 95,
+    });
+    expect(candidate).toMatchObject({ eventKind: 'feeding', amount: '', unit: '' });
+    expect(candidate?.warnings).toContain('amount-ambiguous');
+  });
+
+  it('does not infer a wet diaper from negated text and keeps wet plus dirty as BOTH', () => {
+    const negated = candidateFromOcrLine({
+      documentHash: hash, fileName: 'negation-synthetic.png', page: 1, line: 1,
+      text: '2026-10-27 08:10 AM no wet diaper', confidence: 95,
+    });
+    const combined = candidateFromOcrLine({
+      documentHash: hash, fileName: 'combined-synthetic.png', page: 1, line: 2,
+      text: '2026-10-27 08:20 AM wet dirty diaper', confidence: 95,
+    });
+    expect(negated).toMatchObject({ eventKind: 'diaper', diaperType: '' });
+    expect(negated?.warnings).toContain('diaper-kind-unresolved');
+    expect(combined).toMatchObject({ eventKind: 'diaper', diaperType: 'BOTH' });
+  });
+
+  it('retains separate candidates for multiple timed events on one OCR line', () => {
+    const rows = candidatesFromOcrPages([{
+      documentHash: hash, fileName: 'two-events-synthetic.png', page: 1,
+      lines: [{ text: '2026-10-27 08:00 AM bottle formula 3 oz; 2026-10-27 09:00 AM wet diaper', confidence: 95 }],
+    }]);
+    expect(rows).toHaveLength(2);
+    expect(rows.map(candidate => [candidate.eventKind, candidate.time])).toEqual([
+      ['feeding', '08:00'], ['diaper', '09:00'],
+    ]);
+    expect(new Set(rows.map(candidate => candidate.id)).size).toBe(2);
+    const imported = mapReviewedLogSheet({
+      rows: rows.map(candidate => ({ ...candidate, reviewed: true })),
+      babyId: 'baby-1', timezone: 'UTC',
+    });
+    expect(new Set(imported.records.map(record => record.source.recordId)).size).toBe(2);
+  });
+
   it('treats OCR text as data and never parses embedded instructions into events', () => {
     const candidate = candidateFromOcrLine({
       documentHash: hash,

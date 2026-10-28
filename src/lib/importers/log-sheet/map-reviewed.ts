@@ -12,6 +12,7 @@ export interface ReviewedLogSheetCandidate {
   readonly documentHash: string;
   readonly page: number;
   readonly line: number;
+  readonly eventIndex?: number;
   readonly eventKind: 'feeding' | 'diaper' | null;
   readonly date: string;
   readonly time: string;
@@ -106,7 +107,10 @@ export function mapReviewedLogSheet(input: {
     if (!/^[a-f0-9]{64}$/i.test(row.documentHash)) throw new Error('Invalid document fingerprint');
     if (!Number.isInteger(row.page) || row.page < 1 || row.page > 12 || !Number.isInteger(row.line) || row.line < 1 || row.line > 1000) throw new Error('Invalid source page or row number');
     if (row.eventKind !== 'feeding' && row.eventKind !== 'diaper') throw new Error('Choose feeding or diaper for every selected row');
-    const recordId = `${row.documentHash}:baby:${babyId.trim()}:page:${row.page}:line:${row.line}`;
+    const eventIndex = row.eventIndex ?? 0;
+    if (!Number.isInteger(eventIndex) || eventIndex < 0 || eventIndex > 499) throw new Error('Invalid source event index');
+    const sourceRowId = `${row.documentHash}:baby:${babyId.trim()}:page:${row.page}:line:${row.line}`;
+    const recordId = eventIndex === 0 ? sourceRowId : `${sourceRowId}:event:${eventIndex}`;
     if (seen.has(recordId)) throw new Error('The review contains the same source row more than once');
     seen.add(recordId);
     const time = validateOccurrence(row.date, row.time, timezone);

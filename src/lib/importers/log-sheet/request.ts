@@ -21,6 +21,7 @@ export function parseLogSheetExecuteRequest(value: unknown): ReviewedLogSheetImp
       documentHash: text(raw.documentHash, 'document fingerprint', 64),
       page: Number(raw.page),
       line: Number(raw.line),
+      eventIndex: raw.eventIndex === undefined ? 0 : Number(raw.eventIndex),
       eventKind: raw.eventKind === 'feeding' || raw.eventKind === 'diaper' ? raw.eventKind : null,
       date: text(raw.date, 'date', 10),
       time: text(raw.time, 'time', 5),
