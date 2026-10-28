@@ -29,7 +29,7 @@ function render(s) {
   $('reconcileAgent').hidden = !['pending', 'uncertain'].includes(s.provisioning?.status);
   const agy = s.agyUsage || {};
   $('agyInfo').textContent = agy.fresh && agy.remainingPercent !== null ? 'Google AGY remaining: ' + agy.remainingPercent + '% (observed, not automatically polled; no verified auto cutoff)' : 'Google AGY quota unknown/stale. AGY may be dispatched manually only with a separate confirmation; no automatic percentage cutoff.';
-  $('rows').innerHTML = s.sessions.length ? s.sessions.map(a => '<tr><td><strong>' + esc(a.name) + '</strong><div class="subtext">' + esc(a.id) + '</div></td><td>' + esc(a.model) + '<div class="subtext">' + esc(a.harness) + (a.effort ? ' · ' + esc(a.effort) : '') + '</div></td><td><span class="state-chip ' + (a.busy ? 'active' : a.label === 'Blocked' ? 'blocked' : '') + '">' + esc(a.label) + '</span></td><td>' + (a.issue ? '<a href="https://github.com/MulattoTech/BabyTracker/issues/' + Number(a.issue) + '">Issue #' + Number(a.issue) + '</a>' : 'No reserved task') + '<div class="subtext">' + a.prs.map(p => 'PR #' + Number(p.number) + ' · ' + esc(p.ci || p.state || 'unknown')).join(', ') + '</div></td><td>' + (a.unresolvedDelivery ? 'Manual reconciliation needed' : a.cooldownSeconds ? a.cooldownSeconds + 's cooldown' : 'No reliable ETA') + '</td><td><div class="row-actions"><button class="small-action" data-session="' + esc(a.id) + '" data-op="nudge">Nudge</button><button class="small-action accent" data-session="' + esc(a.id) + '" data-op="find-work">Find Work</button><button class="small-action" data-session="' + esc(a.id) + '" data-op="plan">Model plan</button></div></td></tr>').join('') : '<tr><td colspan="6" class="empty">' + (s.runtime.online ? 'No BabyTracker sessions are registered. MJobs agents are excluded. Click Start Fleet to provision one verified BabyTracker Codex orchestrator. No worker is created merely by opening this dashboard.' : 'Orchestrator runtime is unavailable. The local controller and saved task queue remain accessible.') + '</td></tr>';
+  $('rows').innerHTML = s.sessions.length ? s.sessions.map(a => '<tr><td><strong>' + esc(a.name) + '</strong><div class="subtext">' + esc(a.id) + '</div>' + (s.plans?.[a.id] ? '<div class="subtext">' + (s.plans[a.id].status === 'applied_next_turn' ? 'Next turn: ' : s.plans[a.id].status === 'staged' ? 'Saved preference (not applied): ' : 'Model change ' + esc(s.plans[a.id].status.replace(/_/g, ' ')) + ': ') + esc(s.plans[a.id].harness) + ' ' + esc(s.plans[a.id].model) + (s.plans[a.id].status === 'staged' ? ' (NOT applied)' : '') + '</div>' : '') + '</td><td>' + esc(a.model) + '<div class="subtext">' + esc(a.harness) + (a.effort ? ' · ' + esc(a.effort) : '') + '</div></td><td><span class="state-chip ' + (a.busy ? 'active' : a.label === 'Blocked' ? 'blocked' : '') + '">' + esc(a.label) + '</span></td><td>' + (a.issue ? '<a href="https://github.com/MulattoTech/BabyTracker/issues/' + Number(a.issue) + '">Issue #' + Number(a.issue) + '</a>' : 'No reserved task') + '<div class="subtext">' + a.prs.map(p => 'PR #' + Number(p.number) + ' · ' + esc(p.ci || p.state || 'unknown')).join(', ') + '</div></td><td>' + (a.unresolvedDelivery ? 'Manual reconciliation needed' : a.cooldownSeconds ? a.cooldownSeconds + 's cooldown' : 'No reliable ETA') + '</td><td><div class="row-actions"><button class="small-action" data-session="' + esc(a.id) + '" data-op="nudge">Nudge</button><button class="small-action accent" data-session="' + esc(a.id) + '" data-op="find-work">Find Work</button><button class="small-action" data-session="' + esc(a.id) + '" data-op="plan">Change model</button>' + (s.plans?.[a.id]?.status === 'queued' ? '<button class="small-action" data-session="' + esc(a.id) + '" data-op="model-cancel">Cancel change</button>' : '') + (['unverified','reconcile_required'].includes(s.plans?.[a.id]?.status) ? '<button class="small-action" data-session="' + esc(a.id) + '" data-op="model-reconcile">Verify change</button>' : '') + (s.plans?.[a.id]?.status === 'resume_required' ? '<button class="small-action" data-session="' + esc(a.id) + '" data-op="model-resume">Resume change</button>' : '') + '</div></td></tr>').join('') : '<tr><td colspan="6" class="empty">' + (s.runtime.online ? 'No BabyTracker sessions are registered. MJobs agents are excluded. Click Start Fleet to provision one verified BabyTracker Codex orchestrator. No worker is created merely by opening this dashboard.' : 'Orchestrator runtime is unavailable. The local controller and saved task queue remain accessible.') + '</td></tr>';
   $('tasks').innerHTML = s.tasks.length ? s.tasks.map(t => '<div class="task-item"><div><strong>' + esc(t.priority) + ' · ' + esc(t.title) + '</strong><p><a href="https://github.com/MulattoTech/BabyTracker/issues/' + Number(t.issue) + '">Requirement #' + Number(t.issue) + '</a> · ' + esc(t.status) + ' · Acceptance: ' + esc(t.acceptance) + '</p><p>' + esc(t.files.join(', ')) + '</p></div>' + (['proposed', 'queued'].includes(t.status) ? '<div><select aria-label="Assign worker" data-task="' + esc(t.id) + '"><option value="">Choose available worker</option>' + s.sessions.filter(a => a.idle).map(a => '<option value="' + esc(a.id) + '"' + (a.id === t.agentId ? ' selected' : '') + '>' + esc(a.name) + '</option>').join('') + '</select></div>' : '') + '</div>').join('') : '<div class="empty">No assigned tasks. Add a real GitHub issue with a bounded scope to propose the next useful change.</div>';
   if (!limitsLoaded) { for (const [key, value] of Object.entries(s.limits)) $('limitsForm').elements[key].value = value; limitsLoaded = true; }
 }
@@ -51,7 +51,12 @@ $('taskForm').addEventListener('submit', async event => { event.preventDefault()
 $('tasks').addEventListener('change', event => { const select = event.target.closest('select[data-task]'); if (select?.value) action('assign', { taskId: select.dataset.task, agentId: select.value }).catch(() => {}); });
 $('rows').addEventListener('click', async event => {
   const button = event.target.closest('button[data-session]'); if (!button) return;
-  if (button.dataset.op !== 'plan') {
+  const op = button.dataset.op;
+  if (['model-cancel','model-reconcile','model-resume'].includes(op)) {
+    if (op === 'model-cancel' && !confirm('Cancel this queued model change without stopping the current turn?')) return;
+    return action(op,{ id: button.dataset.session }).catch(() => {});
+  }
+  if (op !== 'plan') {
     const found = snapshot?.sessions.find(s => s.id === button.dataset.session);
     const agy = found?.harness === 'agy';
     if (agy && !confirm('AGY has no verified automatic percentage quota cutoff. Send exactly one bounded manual instruction? This may use your Google AI allowance.')) return;
@@ -60,13 +65,41 @@ $('rows').addEventListener('click', async event => {
   try {
     providers = (await get('/api/providers')).providers.filter(p => p.available && p.models.length);
     if (!providers.length) return toast('No provider model catalog has been verified for this installation yet.', true);
-    $('planAgent').value = button.dataset.session; $('planProvider').innerHTML = providers.map(p => '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>').join(''); updateModels(); $('planDialog').showModal();
+    $('planAgent').value = button.dataset.session; $('planProvider').innerHTML = providers.map(p => '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>').join('');
+    const current = snapshot.sessions.find(s => s.id === button.dataset.session);
+    const prior = snapshot.plans?.[current.id];
+    if (providers.some(p => p.id === prior?.harness)) $('planProvider').value = prior.harness;
+    else if (providers.some(p => p.id === current.harness)) $('planProvider').value = current.harness;
+    updateModels();
+    const model = providers.find(p => p.id === $('planProvider').value)?.models.find(m => m.id === prior?.model || m.id === current.model);
+    if (model) $('planModel').value = model.id;
+    updateEfforts();
+    if (model && model.efforts.includes(prior?.effort)) $('planEffort').value = prior.effort;
+    $('planDialog').showModal();
   } catch (e) { toast(e.message, true); }
 });
 function updateModels() { const provider = providers.find(p => p.id === $('planProvider').value); $('planModel').innerHTML = (provider?.models || []).map(m => '<option value="' + esc(m.id) + '">' + esc(m.name) + '</option>').join(''); updateEfforts(); }
 function updateEfforts() { const model = providers.find(p => p.id === $('planProvider').value)?.models.find(m => m.id === $('planModel').value); $('planEffort').innerHTML = (model?.efforts || []).map(e => '<option>' + esc(e) + '</option>').join(''); }
 $('planProvider').addEventListener('change', updateModels); $('planModel').addEventListener('change', updateEfforts);
-$('savePlan').addEventListener('click', async () => { try { await action('model-plan', { id: $('planAgent').value, plan: { harness: $('planProvider').value, model: $('planModel').value, effort: $('planEffort').value, mode: 'tui' } }); $('planDialog').close(); } catch {} });
+$('savePlan').addEventListener('click', async () => {
+  const id=$('planAgent').value, source=snapshot?.sessions.find(a => a.id === id);
+  if (!source) return toast('Session no longer exists; refresh before changing models.', true);
+  const target=$('planProvider').value, agy=target==='agy';
+  if (source.harness === 'agy' && agy) return toast('The installed AO cannot change the model within an AGY Terminal session in place. Use /model inside the AGY terminal, or create a new AGY agent.',true);
+  const note=source.harness===target && target==='codex' && source.mode==='chat'
+    ? 'Save this Codex model/effort for the NEXT turn in the same session? Any active turn will finish on its existing model.'
+    : 'Queue a safe model handoff in the same BabyTracker AO session? If working, it will finish its current turn first. No task or worktree will be destroyed.';
+  if (!confirm(note)) return;
+  if (agy && !confirm('AGY / Google Gemini quota has no verified automatic cutoff. Applying the provider change may start AGY and consume Google usage. Proceed?')) return;
+  if (source.kind==='orchestrator' && source.harness!==target && !confirm('This is the PRIMARY orchestrator. The provider will change after a verified handoff. Confirm?')) return;
+  $('savePlan').disabled=true;
+  try {
+    const result=await action('model-change',{ id, plan: { harness:target, model:$('planModel').value, effort:$('planEffort').value,
+      mode:agy?'tui':'chat', acknowledgeUnknownAgyQuota:agy, acknowledgeOrchestratorHandoff:source.kind==='orchestrator' }});
+    $('planDialog').close();
+    if (result.status==='blocked' || result.status==='unverified') toast('Change requires attention: '+result.status,true);
+  } catch {} finally { $('savePlan').disabled=false; }
+});
 async function loadAgentProviders() {
   const catalog = await get('/api/providers');
   providers = (catalog.providers || []).filter(p => p.available && p.models?.length && ['codex', 'agy'].includes(p.id));

@@ -96,3 +96,28 @@ test('unified portal GET is read-only and Add Agent action preserves local token
   assert.deepEqual(calls.map(x=>x[0]),['add','dispatch','reconcile']);
   assert.deepEqual(calls[1][3],{manualAgy:true});
 });
+
+test('Model-change HTTP control requires local-origin token and returns real native status',async t=>{
+ const invoked=[];
+ const controller={
+   state:{mode:'running'},snapshot:async()=>({mode:'running',sessions:[]}),
+   providers:async()=>({providers:[]}),
+   changeModel:async(id,plan)=>{invoked.push({id,plan});return {ok:true,status:'queued',note:'Current turn continues; queued for idle.'};},
+   cancelModelChange:async id=>({ok:true,status:'cancelled',id}),
+   reconcileModelChange:async id=>({ok:true,status:'applied',id}),
+   resumeModelChange:async id=>({ok:true,status:'queued',id})
+ };
+ const server=createServer({config:{projectId:'babytracker'},controller});
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));
+ t.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
+ const origin='http://127.0.0.1:'+server.address().port;
+ const token=(await (await fetch(origin+'/api/session')).json()).token;
+ const payload={action:'model-change',id:'baby-worker-1',plan:{harness:'agy',model:'gemini-3.8-flash-high',effort:'high',acknowledgeUnknownAgyQuota:true}};
+ const post=(csrf,remoteOrigin=origin)=>fetch(origin+'/api/action',{method:'POST',headers:{origin:remoteOrigin,'X-BabyTracker-Fleet':csrf,'Content-Type':'application/json'},body:JSON.stringify(payload)});
+ assert.equal((await post('invalid')).status,403);
+ assert.equal((await post(token,'https://evil.example')).status,403);
+ assert.equal(invoked.length,0);
+ const response=await post(token);
+ assert.equal(response.status,200);assert.equal((await response.json()).status,'queued');
+ assert.deepEqual(invoked,[{id:'baby-worker-1',plan:payload.plan}]);
+});
