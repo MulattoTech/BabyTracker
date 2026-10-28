@@ -9,6 +9,7 @@ const { validateSelection } = require('./vendor/mjobs/provider-catalog');
 const { PROJECT, SOURCE_REPO, ISSUE_REPO } = require('./config');
 const { validateAgentInput } = require('./agent-provision');
 const { ModelChanges } = require('./model-changes');
+const { capacitySnapshot } = require('./capacity');
 
 function writeJSON(file, value) {
   const temp = file + '.' + process.pid + '.tmp';
@@ -17,7 +18,7 @@ function writeJSON(file, value) {
 }
 function active(s) { return !s.isTerminated && !['exited', 'terminated', 'stopped'].includes(s.activity?.state || s.activity || s.status); }
 function idle(s) { return (s.activity?.state || s.activity) === 'idle' && !s.isTerminated; }
-function busy(s) { return ['active', 'working'].includes(s.activity?.state || s.activity); }
+function busy(s) { return active(s) && ['active', 'working'].includes(s.activity?.state || s.activity); }
 
 class FleetController {
   constructor(config, { adapter, quota, providers = async () => ({ providers: [] }), agyUsage = async () => ({ fresh: false, remainingPercent: null }), nativeModel = null, now = Date.now, resources = () => ({ freeMemoryGiB: os.freemem() / 1073741824, totalMemoryGiB: os.totalmem() / 1073741824, cpuPercent: null, diskIO: null }) }) {
@@ -99,15 +100,53 @@ class FleetController {
     }
     return observation;
   }
+  capacity(sessions, online = true) {
+    return capacitySnapshot({ sessions, entries: this.ledger.entries, limit: this.state.limits.concurrency,
+      now: this.now(), cooldownMs: this.ledger.cooldownMs, online });
+  }
+  async updateConcurrency(value) {
+    return this.serial(async () => {
+      if (['emergency','draining'].includes(this.state.mode)) throw Error('Finish emergency/drain recovery before changing concurrency');
+      if (!Number.isInteger(value) || value < 1 || value > 32) throw Error('Parallel-turn limit must be an integer from 1 to 32');
+      const previous = this.state.limits.concurrency;
+      this.state.limits.concurrency = value; this.save();
+      this.audit('concurrency_limit_changed', { previous, concurrency: value });
+      let sessions = [], online = true;
+      try { sessions = await this.sessions(); } catch { online = false; }
+      return { ok: true, capacity: this.capacity(sessions, online), note: 'Parallel-turn limit saved at ' + value + '. Existing turns were not stopped, new tasks were not sent, and quota protection was unchanged.' };
+    });
+  }
+  dispatchAvailability(s, capacity) {
+    if (!active(s)) return { canDispatch: false, code: 'inactive', reason: 'Agent is stopped or terminated' };
+    if (busy(s)) return { canDispatch: false, code: 'busy', reason: 'This agent is already working; no duplicate turn will be sent' };
+    const plan = this.state.plans[s.id];
+    if (['queued','submitting','transitioning','unverified','reconcile_required','resume_required'].includes(plan?.status))
+      return { canDispatch: false, code: 'model', reason: 'Model change ' + plan.status + ': complete or verify this handoff first' };
+    const reservation = this.ledger.entries[s.id];
+    if (reservation && ['reserved','uncertain'].includes(reservation.status))
+      return { canDispatch: false, code: 'delivery', reason: 'A previous delivery is unresolved; inspect and reconcile it before resending' };
+    const reason = this.guard({ session: s, manualAgy: s.harness === 'agy' });
+    if (reason) return { canDispatch: false, code: 'guard', reason };
+    const task = this.state.tasks.find(t => t.agentId === s.id && t.status === 'queued');
+    if (task?.dependencies?.some(id => !this.state.tasks.some(t => t.id === id && t.status === 'accepted')))
+      return { canDispatch: false, code: 'dependency', reason: 'Task is waiting on an accepted dependency' };
+    if (reservation && this.now() - reservation.at < this.ledger.cooldownMs)
+      return { canDispatch: false, code: 'cooldown', reason: 'A recent submission is still in its duplicate-send cooldown' };
+    if (!capacity.online || capacity.full) return { canDispatch: false, code: 'capacity', reason: capacity.reason };
+    if (!idle(s)) return { canDispatch: false, code: 'runtime', reason: 'Agent is not idle; inspect the native agent for pending input' };
+    return { canDispatch: true, code: 'ready', reason: s.harness === 'agy' ? 'Manual dispatch only; separate Google quota confirmation required' : 'Ready for one bounded dispatch', requiresConfirmation: s.harness === 'agy' };
+  }
   async snapshot() {
     let sessions = [], runtime = { online: true, reason: null };
     try { sessions = await this.sessions(); } catch (e) { runtime = { online: false, reason: e.message }; }
     const now = this.now();
+    const capacity = this.capacity(sessions, runtime.online);
     const rows = sessions.map(s => {
       const task = this.state.tasks.find(t => t.agentId === s.id && !['accepted', 'cancelled'].includes(t.status));
       const reservation = this.ledger.entries[s.id];
       const ambiguous = reservation && ['reserved', 'uncertain'].includes(reservation.status);
       const cooldown = reservation && !ambiguous ? Math.max(0, reservation.at + this.ledger.cooldownMs - now) : 0;
+      const eligibility = this.dispatchAvailability(s, capacity);
       let label = 'Blocked';
       if (busy(s)) label = /review/i.test(s.displayName || '') ? 'Reviewing' : 'Actively Working';
       else if (!active(s)) label = 'Paused';
@@ -118,10 +157,14 @@ class FleetController {
       else if (idle(s)) label = 'Available for Dispatch';
       if (!busy(s) && ['queued','submitting','transitioning','unverified','reconcile_required','resume_required'].includes(this.state.plans[s.id]?.status))
         label = this.state.plans[s.id].status === 'transitioning' ? 'Switching model' : 'Model change ' + this.state.plans[s.id].status.replace(/_/g, ' ');
-      return { id: s.id, projectId: PROJECT, name: s.displayName || s.id, kind: s.kind || 'worker', mode: s.mode || 'unknown', runtimeActive:active(s), harness: s.harness || 'unknown', model: s.model || 'unknown', effort: s.effort || null, label, busy: busy(s), idle: idle(s), taskId: task?.id || null, issue: task?.issue || null, prs: (s.prs || []).map(p => ({ number: p.number, state: p.state, ci: p.ci, url: typeof p.url === 'string' && p.url.startsWith('https://github.com/' + SOURCE_REPO + '/') ? p.url : null })), cooldownSeconds: Math.ceil(cooldown / 1000), dispatchEta: cooldown > 0 ? new Date(now + cooldown).toISOString() : null, unresolvedDelivery: !!ambiguous, tokens: null, turnStatistics: null, lastActivity: s.activity?.timestamp || null };
+      if (idle(s) && this.state.mode === 'running' && !eligibility.canDispatch) {
+        if (eligibility.code === 'capacity') label = 'Waiting for slot';
+        else if (eligibility.code === 'guard') label = 'Blocked by policy';
+      }
+      return { ...eligibility, id: s.id, projectId: PROJECT, name: s.displayName || s.id, kind: s.kind || 'worker', mode: s.mode || 'unknown', runtimeActive:active(s), harness: s.harness || 'unknown', model: s.model || 'unknown', effort: s.effort || null, label, busy: busy(s), idle: idle(s), taskId: task?.id || null, issue: task?.issue || null, prs: (s.prs || []).map(p => ({ number: p.number, state: p.state, ci: p.ci, url: typeof p.url === 'string' && p.url.startsWith('https://github.com/' + SOURCE_REPO + '/') ? p.url : null })), cooldownSeconds: Math.ceil(cooldown / 1000), dispatchEta: cooldown > 0 ? new Date(now + cooldown).toISOString() : null, unresolvedDelivery: !!ambiguous, tokens: null, turnStatistics: null, lastActivity: s.activity?.lastActivityAt || s.activity?.timestamp || null };
     });
     const agyUsage = await this.agyReader().catch(() => ({ fresh: false, remainingPercent: null, reason: 'AGY usage unavailable' }));
-    const result = { observedAt: new Date(now).toISOString(), agyUsage, provisioning: this.state.provisioning || null, projectId: PROJECT, sourceRepository: SOURCE_REPO, issueRepository: ISSUE_REPO, mode: this.state.mode, runtime, sessions: rows, tasks: this.state.tasks, plans: this.state.plans, limits: this.state.limits, run: this.state.run, quota: this.quota(), quotaPolicy:this.quotaPolicy(), resources: this.resources(), dispatchBlocker: this.guard(), codexDispatchBlocker: this.guard({ session: { harness: 'codex' } }), emergency: this.state.emergency, summary: { total: rows.length, working: rows.filter(x => x.busy).length, available: rows.filter(x => x.label === 'Available for Dispatch').length, blocked: rows.filter(x => x.label === 'Blocked').length }, acceptance: { status: 'NOT_ASSESSED', percent: null, note: 'Task completion is separate from requirement acceptance; no acceptance evidence has been imported.' }, capabilities: { scopedControl: true, persistentQueue: true, boundedDispatch: true, independentReviewGate: true, modelPlans: true, modelReplacement: false, nativeChatNextTurnModel: !!this.modelChanges.native, nativeTuiProviderHandoff: !!this.modelChanges.native, queuedGracefulModelChange: !!this.modelChanges.native, sameHarnessTuiModelChange: false, firstCodexBootstrap: typeof this.adapter.provisionCodex === 'function', explicitAgentProvisioning: typeof this.adapter.provisionSelection === 'function', dynamicProvisioning: true, automaticWorkerScaling: false, geminiBudget: false, diskIO: false, perAgentTokens: false } };
+    const result = { observedAt: new Date(now).toISOString(), capacity, agyUsage, provisioning: this.state.provisioning || null, projectId: PROJECT, sourceRepository: SOURCE_REPO, issueRepository: ISSUE_REPO, mode: this.state.mode, runtime, sessions: rows, tasks: this.state.tasks, plans: this.state.plans, limits: this.state.limits, run: this.state.run, quota: this.quota(), quotaPolicy:this.quotaPolicy(), resources: this.resources(), dispatchBlocker: this.guard(), codexDispatchBlocker: this.guard({ session: { harness: 'codex' } }), emergency: this.state.emergency, summary: { total: rows.length, working: rows.filter(x => x.busy).length, available: rows.filter(x => x.canDispatch).length, blocked: rows.filter(x => x.runtimeActive && !x.busy && !x.canDispatch).length }, acceptance: { status: 'NOT_ASSESSED', percent: null, note: 'Task completion is separate from requirement acceptance; no acceptance evidence has been imported.' }, capabilities: { scopedControl: true, persistentQueue: true, boundedDispatch: true, independentReviewGate: true, modelPlans: true, modelReplacement: false, nativeChatNextTurnModel: !!this.modelChanges.native, nativeTuiProviderHandoff: !!this.modelChanges.native, queuedGracefulModelChange: !!this.modelChanges.native, sameHarnessTuiModelChange: false, firstCodexBootstrap: typeof this.adapter.provisionCodex === 'function', explicitAgentProvisioning: typeof this.adapter.provisionSelection === 'function', dynamicProvisioning: true, automaticWorkerScaling: false, geminiBudget: false, diskIO: false, perAgentTokens: false } };
     this.lastSnapshot = result; return result;
   }
   async serial(fn) {
@@ -355,7 +398,8 @@ class FleetController {
       if (['queued','submitting','transitioning','unverified','reconcile_required','resume_required'].includes(this.state.plans[id]?.status)) throw Error('A model handoff is queued or unverified for this agent; no new work can be assigned until it completes');
       blocker = this.guard({ session: s, manualAgy }); if (blocker) throw Error(blocker);
       if (s.harness === 'agy') await this.verifyAgyQuota();
-      if (this.occupiedSlots(sessions).size >= this.state.limits.concurrency) throw Error('Concurrency target reached; pending submissions count until runtime state settles');
+      const capacity = this.capacity(sessions);
+      if (capacity.full) throw Error(capacity.reason);
       const primary = sessions.find(x => x.kind === 'orchestrator' && active(x))?.id || 'the BabyTracker integration owner';
       const task = this.state.tasks.find(t => t.agentId === id && t.status === 'queued');
       if (task?.dependencies.some(dep => !this.state.tasks.some(t => t.id === dep && t.status === 'accepted'))) throw Error('Task is waiting on an accepted dependency');
@@ -388,6 +432,8 @@ class FleetController {
   }
   async allHands() {
     const sessions = await this.sessions(); const results = [];
+    const capacity = this.capacity(sessions);
+    if (capacity.full) return { ok: true, results, capacity, note: capacity.reason };
     for (const s of sessions.filter(s => idle(s) && s.harness === 'codex' && !['queued','submitting','transitioning','unverified','reconcile_required','resume_required'].includes(this.state.plans[s.id]?.status))) {
       if (this.guard()) break;
       try { results.push({ id: s.id, ...(await this.dispatch(s.id)) }); }
@@ -397,14 +443,7 @@ class FleetController {
     }
     return { results, note: 'One bounded Codex-only pass. AGY is excluded from automatic All Hands because its quota cutoff is not verified.' };
   }
-  occupiedSlots(sessions) {
-    const occupied = new Set(sessions.filter(busy).map(s => s.id));
-    for (const s of sessions.filter(active)) {
-      const reservation = this.ledger.entries[s.id];
-      if (reservation && (['reserved', 'uncertain'].includes(reservation.status) || this.now() - reservation.at < this.ledger.cooldownMs)) occupied.add(s.id);
-    }
-    return occupied;
-  }
+  occupiedSlots(sessions) { return new Set(this.capacity(sessions).slots.map(s => s.id)); }
   async changeModel(id, input) { return this.serial(() => this.modelChanges.request(id, input)); }
   async cancelModelChange(id) { return this.serial(() => this.modelChanges.cancel(id)); }
   async reconcileModelChange(id) { return this.serial(() => this.modelChanges.reconcile(id)); }
