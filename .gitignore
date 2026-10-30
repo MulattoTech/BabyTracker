@@ -16,3 +16,7 @@
 node_modules/
 .DS_Store
 /test-results/
+
+# Python operations tests and local caches
+__pycache__/
+*.pyc
