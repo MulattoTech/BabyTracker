@@ -1,3 +1,13 @@
+# BabyTracker Master
+
+**One maintained source:** [BabyTracker-Master](https://github.com/MulattoTech/BabyTracker-Master), local `C:\Tools\Dev\BabyTracker-Master`.
+
+[Live family tracker](https://tracker.m-techlabs.com) | [Protected synthetic preview](https://tracker-preview.m-techlabs.com) | [Master workspace / safe releases](docs/MASTER_WORKSPACE.md) | [Gemini Terminal mission](docs/handoff/GEMINI-OCR-MISSION.md)
+
+The repository was renamed in place; original history and issue numbers are preserved.
+Baseline local OCR already exists. Handwriting coverage, a full module-management UI,
+and unattended release promotion remain future work; see issue #50 and the handoff.
+
 # BabyTracker
 
 One canonical repository for the BabyTracker application, OCR import, deployment,
