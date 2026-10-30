@@ -32,6 +32,22 @@ function parseCommand(output, label) {
   catch { throw Error(label + ' returned invalid JSON'); }
 }
 
+// AO's successful exit does not prove a session was created. Keep only bounded,
+// allowlisted response metadata if verification fails; never retain raw CLI output.
+function spawnResponseHint(result) {
+  const stdout = typeof result?.stdout === 'string' ? result.stdout : '';
+  const stderr = typeof result?.stderr === 'string' ? result.stderr : '';
+  const sample = (stdout + '\n' + stderr).slice(0, 100000);
+  const flags = ['queued', 'created', 'spawned', 'error', 'failed', 'warning',
+    'unauthorized', 'permission', 'project', 'workspace', 'timeout']
+    .filter(word => new RegExp('\\b' + word + '\\b', 'i').test(sample));
+  const sessionIds = [...new Set(sample.match(/\bbabytracker-\d{1,6}\b/g) || [])].slice(0, 3);
+  return 'AO response bytes=' + Math.min(Buffer.byteLength(stdout), 100000) + '/' +
+    Math.min(Buffer.byteLength(stderr), 100000) +
+    '; flags=' + (flags.join(',') || 'none') +
+    '; sessionHints=' + (sessionIds.join(',') || 'none');
+}
+
 async function provisionFirstCodex(config, { runner, sessions, onSubmit = () => {}, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
   if (!config.runtimeVerified) throw Error('BabyTracker AO project binding is not verified');
   if (!config.aoPath || !fs.statSync(config.aoPath, { throwIfNoEntry: false })?.isFile()) {
@@ -62,8 +78,9 @@ async function provisionFirstCodex(config, { runner, sessions, onSubmit = () => 
   if (existing) return { id: existing.id, created: false };
   const previousIds = new Set(before.map(s => s.id));
   onSubmit(); // Persist an uncertain-delivery latch before the first native mutation.
-  await run(['spawn', '--project', PROJECT, '--kind', 'orchestrator',
+  const spawnResult = await run(['spawn', '--project', PROJECT, '--kind', 'orchestrator',
     '--harness', 'codex', '--mode', 'chat', '--name', BOOTSTRAP_NAME], 30000);
+  const responseHint = spawnResponseHint(spawnResult);
   for (let attempt = 0; attempt < 16; attempt++) {
     const after = await sessions();
     if (!Array.isArray(after)) throw Error('AO session verification is unavailable');
@@ -73,7 +90,7 @@ async function provisionFirstCodex(config, { runner, sessions, onSubmit = () => 
     if (found.length > 1) throw Error('Multiple new BabyTracker orchestrators appeared; manual reconciliation required');
     if (attempt < 15) await sleep(300);
   }
-  throw Error('AO accepted provisioning but the new BabyTracker session could not be verified; no automatic retry');
+  throw Error('AO accepted provisioning but the new BabyTracker session could not be verified; no automatic retry. ' + responseHint);
 }
 
 module.exports = { provisionFirstCodex, isCodex, repositoryId, sameDirectory, BOOTSTRAP_NAME };

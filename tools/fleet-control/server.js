@@ -76,6 +76,7 @@ function createServer({ config, controller, onRestart = null, projectsReader = a
       if (closing) return json(res, 409, { error: 'Controller is restarting' });
       let result;
       switch (input.action) {
+        case 'reconcile-bootstrap': result = await controller.reconcileBootstrap(input.confirm); break;
         case 'start': result = await controller.start(); break;
         case 'pause': result = controller.pause(); break;
         case 'drain': result = await controller.stop(false); break;
@@ -92,6 +93,7 @@ function createServer({ config, controller, onRestart = null, projectsReader = a
         case 'concurrency-policy': result = await controller.updateConcurrency(input.concurrency); break;
         case 'task': result = controller.enqueue(input.task); break;
         case 'assign': result = await controller.assign(input.taskId, input.agentId); break;
+        case 'assess-task': result = await controller.assessTask(input.taskId, input); break;
         case 'model-plan': throw Error('Staging-only model plans are no longer supported. Reload this dashboard and use Change model to apply a real native AO change.');
         case 'model-change': result = await controller.changeModel(input.id, input.plan); break;
         case 'model-cancel': result = await controller.cancelModelChange(input.id); break;
@@ -118,7 +120,7 @@ function main() {
   const providers = createSharedProviders(config);
   const controller = new FleetController(config, { adapter: new AOAdapter(config), quota: () => quotaSnapshot(config.quotaFile), nativeModel: new NativeModelSwitch(config), agyUsage: () => providers.usage(), providers: async () => {
     const value = await providers.get();
-    return { ...value, source: 'MJobs verified Codex model catalog (read-only), local AGY model availability. Agent model changes use verified native AO next-turn settings and provider handoff.' };
+    return { ...value, source: 'MJobs Codex catalog (read-only); AGY static adapter-supported models, not live/account-verified. Background CLI probes are disabled; explicit agent controls are unchanged.' };
   } });
   let ending = false;
   const stop = code => {

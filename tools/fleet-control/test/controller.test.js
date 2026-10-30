@@ -37,6 +37,27 @@ function fixture(t, options = {}) {
   return { controller, state, config, deps, adapter, dir, advance: ms => { time += ms; } };
 }
 
+test('uncertain bootstrap reconciles only after two unchanged project reads and audit delay', async t => {
+  const f = fixture(t, { sessions: [session('mjobs-worker', { projectId: 'mjobs-luna' })], bootstrap: 'uncertain' });
+  await assert.rejects(f.controller.start(), /unverified/);
+  assert.equal(f.controller.state.bootstrap.status, 'uncertain');
+  await assert.rejects(f.controller.reconcileBootstrap('wrong'), /confirmation/);
+  await assert.rejects(f.controller.reconcileBootstrap('RECONCILE BOOTSTRAP'), /timing/);
+  f.advance(31_000);
+  const result = await f.controller.reconcileBootstrap('RECONCILE BOOTSTRAP');
+  assert.equal(result.ok, true);
+  assert.equal(f.controller.state.bootstrap.status, 'reconciled_no_new_session');
+  assert.equal(f.controller.state.mode, 'paused');
+  assert.equal(f.state.provisions, 1);
+});
+test('uncertain bootstrap cannot clear when a new project session appears', async t => {
+  const f = fixture(t, { sessions: [session('mjobs-worker', { projectId: 'mjobs-luna' })], bootstrap: 'uncertain' });
+  await assert.rejects(f.controller.start(), /unverified/);
+  f.advance(31_000);
+  f.state.sessions.push(session('baby-new', { createdAt: new Date(Date.parse('2026-10-27T10:00:01Z')).toISOString(), activity: { state: 'exited' } }));
+  await assert.rejects(f.controller.reconcileBootstrap('RECONCILE BOOTSTRAP'), /appeared/);
+  assert.equal(f.controller.state.bootstrap.status, 'uncertain');
+});
 test('startup and every dashboard read spend no inference and exclude MJobs', async t => {
   const f = fixture(t); const snap = await f.controller.snapshot();
   assert.equal(snap.mode, 'paused'); assert.equal(snap.sessions.length, 2);

@@ -85,6 +85,26 @@ test('a failed native submission is not retried automatically', async t => {
   assert.equal(f.state.called.filter(x => x[0] === 'spawn').length, 1);
 });
 
+test('unverified spawn records bounded allowlisted diagnostics without raw CLI output', async t => {
+  const f = fixture(t);
+  const original = f.deps.runner;
+  let spawnAttempts = 0;
+  f.deps.runner = async (...args) => {
+    if (args[1][0] === 'spawn') {
+      spawnAttempts++;
+      return { stdout: 'queued babytracker-7 Bearer exampleSecret user@example.com C:\\Private\\record', stderr: 'warning' };
+    }
+    return original(...args);
+  };
+  await assert.rejects(provisionFirstCodex(f.config, f.deps), error => {
+    assert.match(error.message, /AO response bytes=\d+\/\d+; flags=queued,warning; sessionHints=babytracker-7/);
+    assert.doesNotMatch(error.message, /exampleSecret|user@example.com|Private|Bearer/);
+    assert.ok(error.message.length < 250);
+    return true;
+  });
+  assert.equal(spawnAttempts, 1);
+});
+
 test('unverifiable newly created identity fails closed instead of accepting another project', async t => {
   const f = fixture(t);
   const previous = f.deps.runner;
