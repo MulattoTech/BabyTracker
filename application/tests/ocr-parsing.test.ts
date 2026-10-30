@@ -110,6 +110,32 @@ describe('OCR care-event drafts', () => {
     expect(rows[2].approved).toBe(false);
   });
 
+  it('keeps unsupported handwriting unresolved for manual transcription and retains hostile text as data', () => {
+    const raw = '<script>alert("synthetic")</script> 2026-04-14 9 PM bottle 60 mL';
+    const row = parseOcrPages([{ page: 1, text: raw, engine: 'synthetic-unavailable-handwriting', extractionVersion: 'fixture-v3', recognitionMode: 'handwriting-unsupported', width: 400, height: 100, lines: [
+      { text: raw, crop: { x: 4, y: 5, width: 300, height: 40 } },
+    ] }])[0];
+    expect(row).toMatchObject({ eventType: 'unknown', localDate: null, localTime: null, feedType: null, amount: null, unit: null, approved: false, notes: raw,
+      source: { rawText: raw, crop: { x: 4, y: 5, width: 300, height: 40 }, extractionVersion: 'fixture-v3', recognitionMode: 'handwriting-unsupported' } });
+    expect(row.warnings).toContain('Handwriting is unsupported; transcribe this line manually from the source.');
+    expect(validateOcrCandidate(row, { allowIncomplete: true }).candidate?.source).toMatchObject({ crop: { x: 4, y: 5, width: 300, height: 40 }, extractionVersion: 'fixture-v3' });
+    const manual = validateOcrCandidate({ ...row, source: { ...row.source, engine: 'manual', recognitionMode: undefined } }, { allowIncomplete: true });
+    expect(manual.candidate?.source.recognitionMode).toBe('manual-transcription');
+  });
+
+  it('binds each candidate to the matching recognized line crop', () => {
+    const rows = parseOcrPages([{ page: 2, text: '08:15 bottle formula 90 mL\n09:30 wet diaper', engine: 'synthetic-local', extractionVersion: 'fixture-v1', recognitionMode: 'printed-baseline', width: 500, height: 300,
+      lines: [
+        { text: '08:15 bottle formula 90 mL', crop: { x: 10, y: 20, width: 250, height: 30 } },
+        { text: '09:30 wet diaper', crop: { x: 15, y: 80, width: 190, height: 28 } },
+      ] }], { timeFormat: '24h' });
+    expect(rows).toHaveLength(2);
+    expect(rows.map(row => row.source.crop)).toEqual([
+      { x: 10, y: 20, width: 250, height: 30 },
+      { x: 15, y: 80, width: 190, height: 28 },
+    ]);
+  });
+
   it('flags ambiguous and conflicting diaper descriptions without losing stool notes', () => {
     expect(parse('8 AM wet and dirty diaper, green pellets')[0]).toMatchObject({ diaperType: 'BOTH' });
     expect(parse('8 AM dry and wet diaper')[0].diaperType).toBeNull();
@@ -141,6 +167,7 @@ describe('OCR care-event drafts', () => {
   });
 
   it('bounds document parsing and rejects duplicate page IDs instead of colliding row identity', () => {
+    expect(parseOcrPages([{ page: 1, text: '', lines: [] }])).toEqual([]);
     expect(() => parseOcrPages([{ page: 1, text: '' }, { page: 1, text: '' }])).toThrow('Invalid');
     expect(() => parseOcrPages([{ page: 1, text: 'a'.repeat(4097) }])).toThrow('too long');
     expect(() => parseOcrPages([{ page: 1, text: '8 AM wet diaper\n'.repeat(501) }])).toThrow('500');

@@ -13,6 +13,10 @@ export interface OcrSource {
   readonly engine: string;
   /** The engine's 0–100 score, not a calibrated probability of field correctness. */
   readonly confidence: number | null;
+  /** Recognizer-reported crop in pixels of the normalized source-page preview. */
+  readonly crop?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  readonly recognitionMode?: 'printed-baseline' | 'handwriting-unsupported' | 'manual-transcription';
+  readonly extractionVersion?: string;
   readonly contextDate?: string;
   readonly contextDateOrigin?: 'user' | 'page-header';
 }
@@ -42,6 +46,11 @@ export interface OcrPageText {
   readonly text: string;
   readonly confidence?: number | null;
   readonly engine?: string;
+  readonly recognitionMode?: 'printed-baseline' | 'handwriting-unsupported' | 'manual-transcription';
+  readonly extractionVersion?: string;
+  readonly width?: number;
+  readonly height?: number;
+  readonly lines?: readonly { readonly text: string; readonly crop: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } }[];
 }
 
 export interface OcrParseOptions {
@@ -65,7 +74,7 @@ export interface OcrTimeResolution {
   readonly message?: string;
 }
 
-export const OCR_PARSER_VERSION = 'babytracker-conservative-lines-v1';
+export const OCR_PARSER_VERSION = 'babytracker-conservative-lines-v2';
 export const OCR_MAX_CANDIDATES = 500;
 export const OCR_MAX_NOTES = 2000;
 export const OCR_MAX_SOURCE_LINE = 4096;

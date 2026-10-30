@@ -91,13 +91,16 @@ function makeCandidate(
   page: OcrPageText, lineNumber: number, rawText: string, segment: string,
   eventType: OcrEventType, slot: number, contextDate: string | null,
   contextDateOrigin: 'user' | 'page-header', mode: OcrParseOptions['timeFormat'],
+  crop?: NonNullable<OcrPageText['lines']>[number]['crop'],
+  forceAbstention = false,
 ): OcrCandidate {
   const warnings: string[] = ['Verify every field against the source before approving.'];
+  if (forceAbstention) warnings.push('Handwriting is unsupported; transcribe this line manually from the source.');
   const fieldSources: Partial<Record<OcrEditableField, OcrFieldOrigin>> = {};
   const mark = (field: OcrEditableField, present: boolean, origin: OcrFieldOrigin = 'source') => {
     fieldSources[field] = present ? origin : 'missing';
   };
-  const dateMatches = datesIn(segment);
+  const dateMatches = forceAbstention ? [] : datesIn(segment);
   const ownDate = dateMatches[0];
   let localDate = ownDate ? ownDate.value : contextDate;
   mark('localDate', localDate !== null, ownDate ? 'source' : 'context');
@@ -105,8 +108,8 @@ function makeCandidate(
     fieldSources.localDate = 'ambiguous';
     warnings.push('The source date is incomplete or ambiguous; enter an explicit date.');
   }
-  const ownClocks = clocksIn(segment, mode);
-  const lineClocks = clocksIn(rawText, mode);
+  const ownClocks = forceAbstention ? [] : clocksIn(segment, mode);
+  const lineClocks = forceAbstention ? [] : clocksIn(rawText, mode);
   const inheritedClock = ownClocks.length === 0 && lineClocks.length === 1 ? lineClocks[0] : undefined;
   const clocks = ownClocks.length ? ownClocks : inheritedClock ? [inheritedClock] : [];
   let localTime = clocks[0]?.value ?? null;
@@ -199,6 +202,9 @@ function makeCandidate(
     source: {
       page: page.page, line: lineNumber, slot, rawText, engine: page.engine || OCR_PARSER_VERSION,
       confidence: page.confidence ?? null,
+      ...(page.recognitionMode ? { recognitionMode: page.recognitionMode } : {}),
+      ...(crop ? { crop } : {}),
+      ...(page.extractionVersion ? { extractionVersion: page.extractionVersion } : {}),
       ...(contextDate ? { contextDate, contextDateOrigin } : {}),
     }, fieldSources, warnings,
   };
@@ -212,39 +218,51 @@ export function parseOcrPages(pages: readonly OcrPageText[], options: OcrParseOp
   const pageIds = new Set<number>();
   const candidates: OcrCandidate[] = [];
   for (const page of pages) {
+    const normalizedText = typeof page?.text === 'string' ? page.text.replace(/\r\n?/g, '\n') : '';
+    const pageLines = normalizedText ? normalizedText.split('\n') : [];
     if (!Number.isInteger(page.page) || page.page < 1 || page.page > 10000 || pageIds.has(page.page)
       || typeof page.text !== 'string' || page.text.length > 200000
       || (page.engine !== undefined && (typeof page.engine !== 'string' || page.engine.length > 200))
-      || (page.confidence !== undefined && page.confidence !== null && (!Number.isFinite(page.confidence) || page.confidence < 0 || page.confidence > 100))) {
+      || (page.recognitionMode !== undefined && !['printed-baseline', 'handwriting-unsupported', 'manual-transcription'].includes(page.recognitionMode))
+      || (page.confidence !== undefined && page.confidence !== null && (!Number.isFinite(page.confidence) || page.confidence < 0 || page.confidence > 100))
+      || (page.extractionVersion !== undefined && (typeof page.extractionVersion !== 'string' || page.extractionVersion.length === 0 || page.extractionVersion.length > 300))
+      || (page.width !== undefined && (!Number.isInteger(page.width) || page.width < 1 || page.width > 2400))
+      || (page.height !== undefined && (!Number.isInteger(page.height) || page.height < 1 || page.height > 2400))
+      || (page.lines !== undefined && (!Array.isArray(page.lines) || page.lines.length !== pageLines.length
+        || page.lines.some((line, index) => !line || typeof line.text !== 'string' || line.text !== pageLines[index] || !line.crop
+          || ![line.crop.x, line.crop.y, line.crop.width, line.crop.height].every(Number.isInteger)
+          || line.crop.x < 0 || line.crop.y < 0 || line.crop.width < 1 || line.crop.height < 1
+          || (page.width !== undefined && line.crop.x + line.crop.width > page.width)
+          || (page.height !== undefined && line.crop.y + line.crop.height > page.height))))) {
       throw new Error('Invalid or oversized OCR page.');
     }
     pageIds.add(page.page);
     let contextDate: string | null = options.defaultDate ?? null;
     let contextDateOrigin: 'user' | 'page-header' = 'user';
-    const lines = page.text.replace(/\r\n?/g, '\n').split('\n');
-    for (let index = 0; index < lines.length; index++) {
-      const rawText = lines[index];
+    for (let index = 0; index < pageLines.length; index++) {
+      const rawText = pageLines[index];
       if (!rawText.trim()) continue;
       if (rawText.length > OCR_MAX_SOURCE_LINE) throw new Error('An OCR row is too long; crop the page or use manual entry.');
-      const lineDates = datesIn(rawText);
-      const lineTypes = typesIn(rawText);
-      const clockTokens = clocksIn(rawText, options.timeFormat);
+      const handwritingUnsupported = page.recognitionMode === 'handwriting-unsupported';
+      const lineDates = handwritingUnsupported ? [] : datesIn(rawText);
+      const lineTypes = handwritingUnsupported ? [] : typesIn(rawText);
+      const clockTokens = handwritingUnsupported ? [] : clocksIn(rawText, options.timeFormat);
       const datedHeading = /\b(?:log|sheet|records?|date)\b/i.test(rawText)
         && !/\b(?:wet|dirty|dry|formula|breast|poop|stool|nursing)\b/i.test(rawText)
         && volumesIn(rawText).length === 0;
-      if (lineDates.length === 1 && (lineTypes.length === 0 || datedHeading) && clockTokens.length === 0) {
+      if (!handwritingUnsupported && lineDates.length === 1 && (lineTypes.length === 0 || datedHeading) && clockTokens.length === 0) {
         contextDate = lineDates[0].value; contextDateOrigin = 'page-header';
         if (contextDate !== null) continue;
       }
       // Plain table headings contain no event data. Unknown data rows remain visible.
-      if (lineTypes.length && clockTokens.length === 0 && lineDates.length === 0
+      if (!handwritingUnsupported && lineTypes.length && clockTokens.length === 0 && lineDates.length === 0
         && /\b(?:date|time|amount|unit|notes)\b/i.test(rawText)
         && /^(?:[\s|,:/-]|date|time|feeding|feed|bottle|amount|unit|diaper|wet|dirty|sleep|notes|milk|ml|oz)+$/i.test(rawText)) continue;
       let slot = 0;
-      for (const segment of segmentsIn(rawText)) {
-        const types = typesIn(segment);
+      for (const segment of handwritingUnsupported ? [rawText] : segmentsIn(rawText)) {
+        const types = handwritingUnsupported ? [] : typesIn(segment);
         for (const eventType of types.length ? types : ['unknown'] as const) {
-          candidates.push(makeCandidate(page, index + 1, rawText, segment, eventType, slot++, contextDate, contextDateOrigin, options.timeFormat));
+          candidates.push(makeCandidate(page, index + 1, rawText, segment, eventType, slot++, contextDate, contextDateOrigin, options.timeFormat, page.lines?.[index]?.crop, handwritingUnsupported));
           if (candidates.length > OCR_MAX_CANDIDATES) throw new Error(`At most ${OCR_MAX_CANDIDATES} draft events are supported per document.`);
         }
       }
