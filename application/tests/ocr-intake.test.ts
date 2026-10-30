@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import sharp from 'sharp';
 import { jsPDF } from 'jspdf';
-import { acquireOcrSlot, identifyOcrUpload, readTesseractTsv, recognizeOcrDocument, OCR_LIMITS } from '@/src/lib/ocr/intake';
+import { acquireOcrSlot, identifyOcrUpload, readTesseractTsv, recognizeOcrDocument, recognizeWithOcrAdapter, OCR_LIMITS } from '@/src/lib/ocr/intake';
 import { parseOcrPages } from '@/src/lib/ocr/parser';
 import { openOcrState, sealOcrState } from '@/src/lib/ocr/crypto';
+import { validateAdapterPage } from '@/src/lib/ocr/adapter';
 
 export async function syntheticCareImage(): Promise<Buffer> {
   return sharp(Buffer.from('<svg width="1800" height="900" xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="white"/><g fill="black" font-family="DejaVu Sans" font-size="52"><text x="70" y="120">2026-10-20</text><text x="70" y="240">08:15 bottle formula 90 mL</text><text x="70" y="360">09:30 wet diaper</text><text x="70" y="480">14:00 bottle breast milk 3 oz</text></g></svg>')).png().toBuffer();
@@ -17,7 +18,21 @@ describe('bounded local OCR intake', () => {
   });
   it('does not equate engine confidence with field accuracy', () => {
     const tsv = 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n5\t1\t1\t1\t1\t1\t1\t1\t1\t1\t93\t08:15\n5\t1\t1\t1\t1\t2\t1\t1\t1\t1\t91\tbottle';
-    expect(readTesseractTsv(tsv)).toEqual({ text: '08:15 bottle', confidence: 92 });
+    expect(readTesseractTsv(tsv)).toEqual({ text: '08:15 bottle', confidence: 92, words: [
+      { text: '08:15', confidence: 93, crop: { x: 1, y: 1, width: 1, height: 1 } },
+      { text: 'bottle', confidence: 91, crop: { x: 1, y: 1, width: 1, height: 1 } },
+    ] });
+  });
+  it('validates replaceable adapter evidence and rejects out-of-page crops', () => {
+    const result = { text: '<script>not markup</script>', confidence: 80, engine: 'synthetic-adapter', modelVersion: 'fixture-v1', recognitionMode: 'handwriting-unsupported' as const,
+      words: [{ text: '<script>', confidence: 80, crop: { x: 1, y: 2, width: 3, height: 4 } }] };
+    expect(validateAdapterPage(result, { width: 10, height: 10 })).toMatchObject({ recognitionMode: 'handwriting-unsupported', modelVersion: 'fixture-v1' });
+    expect(() => validateAdapterPage({ ...result, words: [{ ...result.words[0], crop: { x: 9, y: 2, width: 3, height: 4 } }] }, { width: 10, height: 10 })).toThrow('crop');
+  });
+  it('accepts adapter substitution only when its identity matches returned evidence', async () => {
+    const adapter = { id: 'fixture-local', async recognize() { return { text: 'printed words', confidence: null, engine: 'fixture-local', modelVersion: 'model-fixture-1', recognitionMode: 'printed-baseline' as const }; } };
+    await expect(recognizeWithOcrAdapter(adapter, 'synthetic-only', { width: 10, height: 10 })).resolves.toMatchObject({ engine: 'fixture-local', modelVersion: 'model-fixture-1' });
+    await expect(recognizeWithOcrAdapter({ ...adapter, id: 'other' }, 'synthetic-only', { width: 10, height: 10 })).rejects.toThrow('identity');
   });
   it('bounds concurrent jobs and releases the slot', () => {
     const releaseA = acquireOcrSlot('synthetic-a');

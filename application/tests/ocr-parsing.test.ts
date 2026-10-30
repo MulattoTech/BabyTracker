@@ -140,6 +140,22 @@ describe('OCR care-event drafts', () => {
     expect(rows[1].amount).toBeNull();
   });
 
+  it('retains model, crop, and baseline mode as evidence without treating text as markup', () => {
+    const rows = parseOcrPages([{ page: 1, text: '8 AM bottle 60 ml <script>alert(1)</script>', confidence: 99,
+      engine: 'fixture-adapter', modelVersion: 'fixture-v7', recognitionMode: 'printed-baseline',
+      crop: { x: 2, y: 3, width: 40, height: 10 } }]);
+    expect(rows[0].source).toMatchObject({ modelVersion: 'fixture-v7', recognitionMode: 'printed-baseline', crop: { x: 2, y: 3, width: 40, height: 10 } });
+    expect(rows[0].source.rawText).toContain('<script>');
+    expect(rows[0].approved).toBe(false);
+  });
+
+  it('keeps unsupported handwriting as an unresolved manual-transcription draft', () => {
+    const row = parseOcrPages([{ page: 1, text: 'illegible handwriting', engine: 'fixture-adapter', modelVersion: 'fixture-v1', recognitionMode: 'handwriting-unsupported' }])[0];
+    expect(row).toMatchObject({ eventType: 'unknown', localDate: null, localTime: null, approved: false,
+      source: { recognitionMode: 'handwriting-unsupported', modelVersion: 'fixture-v1' },
+      fieldSources: { eventType: 'missing', localDate: 'missing', localTime: 'missing' } });
+  });
+
   it('bounds document parsing and rejects duplicate page IDs instead of colliding row identity', () => {
     expect(() => parseOcrPages([{ page: 1, text: '' }, { page: 1, text: '' }])).toThrow('Invalid');
     expect(() => parseOcrPages([{ page: 1, text: 'a'.repeat(4097) }])).toThrow('too long');
